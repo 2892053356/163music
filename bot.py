@@ -36,6 +36,7 @@ from telegram.request import HTTPXRequest
 
 import config
 from netease_api import NeteaseAPI
+from database import db
 
 # ============================================================
 # 日志
@@ -52,33 +53,16 @@ logger = logging.getLogger(__name__)
 api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
 
 # ============================================================
-# 内存数据存储（用户列表、封禁列表、欢迎语、统计）
-# Render 等云平台文件系统临时，不持久化到文件
+# 数据存储（Upstash Redis 持久化）
 # ============================================================
-
-bot_data = {
-    "users": [],
-    "banned": [],
-    "welcome_message": config.DEFAULT_WELCOME,
-    "stats": {"total_searches": 0, "total_plays": 0},
-}
-
-
-def _save_data(data: dict):
-    """空操作：云部署不写本地文件"""
-    pass
-
 
 def _register_user(user_id: int):
     """记录用户（去重）"""
-    uid = str(user_id)
-    if uid not in bot_data["users"]:
-        bot_data["users"].append(uid)
-        _save_data(bot_data)
+    db.add_user(user_id)
 
 
 def _is_banned(user_id: int) -> bool:
-    return str(user_id) in bot_data["banned"]
+    return db.is_banned(user_id)
 
 
 def _is_admin(user_id: int) -> bool:
@@ -197,8 +181,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # 自定义欢迎语优先，否则用默认
-    custom_welcome = bot_data.get("welcome_message", "")
+    # 自定义欢迎语优先（从Upstash读取），其次环境变量默认，最后用内置
+    custom_welcome = db.get_welcome()
+    if not custom_welcome:
+        custom_welcome = config.DEFAULT_WELCOME
     if custom_welcome:
         welcome = custom_welcome.replace("{username}", user.first_name or "朋友")
         await update.message.reply_text(welcome, parse_mode="HTML")
@@ -260,8 +246,7 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
         await status_msg.edit_text("❌ 搜索失败，请稍后重试。")
         return
 
-    bot_data["stats"]["total_searches"] += 1
-    _save_data(bot_data)
+    db.incr_search()
 
     if not songs:
         await status_msg.edit_text(f"😢 没有找到与「{keyword}」相关的歌曲。")
@@ -348,8 +333,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             await update.message.reply_text(msg, parse_mode="HTML")
         return
 
-    bot_data["stats"]["total_plays"] += 1
-    _save_data(bot_data)
+    db.incr_play()
 
     # 下载音频到内存，自定义文件名
     try:
@@ -513,8 +497,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"内联搜索失败: {e}")
         songs = []
 
-    bot_data["stats"]["total_searches"] += 1
-    _save_data(bot_data)
+    db.incr_search()
 
     if not songs:
         results = [
@@ -640,12 +623,15 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ 权限不足。")
         return
 
+    stats = db.get_stats()
+    users = db.get_users()
+    banned = db.get_banned()
     text = (
         "📊 <b>机器人统计</b>\n\n"
-        f"👥 注册用户数：{len(bot_data['users'])}\n"
-        f"🚫 封禁用户数：{len(bot_data['banned'])}\n"
-        f"🔍 总搜索次数：{bot_data['stats']['total_searches']}\n"
-        f"▶️ 总播放次数：{bot_data['stats']['total_plays']}\n"
+        f"👥 注册用户数：{len(users)}\n"
+        f"🚫 封禁用户数：{len(banned)}\n"
+        f"🔍 总搜索次数：{stats.get('total_searches', 0)}\n"
+        f"▶️ 总播放次数：{stats.get('total_plays', 0)}\n"
         f"🎵 当前音质：{config.MUSIC_QUALITY}"
     )
     await update.message.reply_text(text, parse_mode="HTML")
@@ -666,7 +652,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     failed = 0
     status = await update.message.reply_text("📢 正在广播...")
 
-    for uid in bot_data["users"]:
+    for uid in db.get_users():
         try:
             await context.bot.send_message(
                 chat_id=int(uid),
@@ -692,9 +678,7 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target_id = context.args[0].strip()
-    if target_id not in bot_data["banned"]:
-        bot_data["banned"].append(target_id)
-        _save_data(bot_data)
+    db.ban_user(target_id)
     await update.message.reply_text(f"✅ 已封禁用户 {target_id}")
 
 
@@ -709,9 +693,7 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target_id = context.args[0].strip()
-    if target_id in bot_data["banned"]:
-        bot_data["banned"].remove(target_id)
-        _save_data(bot_data)
+    db.unban_user(target_id)
     await update.message.reply_text(f"✅ 已解封用户 {target_id}")
 
 
@@ -721,11 +703,12 @@ async def cmd_banned(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ 权限不足。")
         return
 
-    if not bot_data["banned"]:
+    banned = db.get_banned()
+    if not banned:
         await update.message.reply_text("📋 当前没有封禁用户。")
         return
 
-    text = "📋 <b>封禁列表</b>\n\n" + "\n".join(f"• {uid}" for uid in bot_data["banned"])
+    text = "📋 <b>封禁列表</b>\n\n" + "\n".join(f"• {uid}" for uid in banned)
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -748,8 +731,7 @@ async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    bot_data["welcome_message"] = new_welcome
-    _save_data(bot_data)
+    db.set_welcome(new_welcome)
     await update.message.reply_text("✅ 欢迎语已更新！预览：", parse_mode="HTML")
     preview = new_welcome.replace("{username}", user.first_name or "朋友")
     await update.message.reply_text(preview, parse_mode="HTML")
@@ -762,7 +744,9 @@ async def cmd_viewwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ 权限不足。")
         return
 
-    current = bot_data.get("welcome_message", "")
+    current = db.get_welcome()
+    if not current:
+        current = config.DEFAULT_WELCOME
     if not current:
         await update.message.reply_text("📝 当前使用默认欢迎语。")
     else:
@@ -776,8 +760,7 @@ async def cmd_resetwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ 权限不足。")
         return
 
-    bot_data["welcome_message"] = ""
-    _save_data(bot_data)
+    db.reset_welcome()
     await update.message.reply_text("✅ 已恢复默认欢迎语。")
 
 
@@ -836,12 +819,30 @@ def main():
     # 错误
     application.add_error_handler(error_handler)
 
-    print("✅ Bot 已启动，按 Ctrl+C 停止")
+    print("✅ Bot 已启动")
     print(f"👑 管理员 ID: {config.ADMIN_ID}")
     print(f"🎵 音质等级: {config.MUSIC_QUALITY}")
+    print(f"💾 Upstash 数据库: {'已连接' if db.enabled else '未配置（数据仅内存）'}")
     print("=" * 50)
 
-    application.run_polling()
+    if config.WEBHOOK_URL:
+        # Webhook 模式（Render 等云平台）
+        webhook_url = f"{config.WEBHOOK_URL.rstrip('/')}/webhook"
+        print(f"🌐 Webhook 模式")
+        print(f"   监听端口: {config.PORT}")
+        print(f"   Webhook URL: {webhook_url}")
+        print("=" * 50)
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=config.PORT,
+            url_path="webhook",
+            webhook_url=webhook_url,
+        )
+    else:
+        # Long Polling 模式（本地调试）
+        print("🔄 Long Polling 模式（未设置 WEBHOOK_URL）")
+        print("=" * 50)
+        application.run_polling()
 
 
 if __name__ == "__main__":

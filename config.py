@@ -25,5 +25,15 @@ SEARCH_RESULTS_LIMIT = int(os.environ.get("SEARCH_RESULTS_LIMIT", "10"))
 # 代理（留空则直连，Render 不需要）
 PROXY_URL = os.environ.get("PROXY_URL", "")
 
-# 默认欢迎语（可通过管理员 /setwelcome 运行时修改，重启后恢复此默认值）
+# Webhook 模式配置
+# Render 会自动设置 RENDER_EXTERNAL_URL 和 PORT
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", os.environ.get("RENDER_EXTERNAL_URL", ""))
+PORT = int(os.environ.get("PORT", "8080"))
+
+# Upstash Redis（免费版，用于数据持久化）
+# 在 upstash.com 创建 Redis 后，在 Details 页面获取 REST URL 和 Token
+UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
+# 默认欢迎语（可通过管理员 /setwelcome 运行时修改，持久化到 Upstash）
 DEFAULT_WELCOME = os.environ.get("DEFAULT_WELCOME", "")

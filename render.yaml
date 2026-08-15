@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: netease-telegram-bot
     runtime: python
     plan: free
@@ -15,4 +15,8 @@ services:
       - key: MUSIC_QUALITY
         value: standard
       - key: DEFAULT_WELCOME
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
