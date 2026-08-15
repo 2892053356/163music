@@ -16,6 +16,9 @@ import logging
 import hashlib
 import requests
 from datetime import datetime
+from urllib.parse import quote
+
+from aiohttp import web
 
 from telegram import (
     Update,
@@ -110,54 +113,55 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
     return audio_bytes
 
 
-async def _upload_audio(context: ContextTypes.DEFAULT_TYPE, song: dict) -> str:
+async def audio_proxy_handler(request):
     """
-    下载音频→打ID3标签→上传到Telegram→返回file_id。
-    无缓存，每次重新处理。
+    音频代理端点：根据 song_id 从网易云下载MP3，写入ID3标签后返回。
+    内联搜索通过此URL让 Telegram 直接拉取音频，无需先上传到管理员私聊。
     """
-    # 获取播放地址
-    try:
-        url = api.get_first_song_url(song["id"], level=config.MUSIC_QUALITY)
-    except Exception as e:
-        logger.error(f"获取播放地址失败 {song['id']}: {e}")
-        return None
-    if not url:
-        return None
+    song_id = request.match_info.get("song_id")
+    name = request.query.get("name", "未知歌曲")
+    artist = request.query.get("artist", "未知艺术家")
+    album = request.query.get("album", "")
+    quality = request.query.get("quality", config.MUSIC_QUALITY)
 
-    # 下载（放到线程池避免阻塞）
     try:
-        resp = await asyncio.to_thread(requests_get, url, 60)
+        sid = int(song_id)
+    except (ValueError, TypeError):
+        return web.Response(status=400, text="Invalid song_id")
+
+    try:
+        # 获取播放地址
+        url_result = api.get_song_url([sid], level=quality)
+        play_url = None
+        for item in url_result.get("data", []):
+            if item.get("id") == sid:
+                play_url = item.get("url")
+                break
+        if not play_url:
+            return web.Response(status=404, text="Song not available")
+
+        # 下载音频
+        resp = await asyncio.to_thread(requests.get, play_url, timeout=60)
+        if resp.status_code != 200:
+            return web.Response(status=502, text="Failed to download audio")
         audio_bytes = io.BytesIO(resp.content)
-    except Exception as e:
-        logger.error(f"下载音频失败 {song['id']}: {e}")
-        return None
 
-    # 打ID3标签
-    audio_bytes = _tag_mp3(audio_bytes, song)
-    filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+        # 写入ID3标签
+        song = {"id": sid, "name": name, "artist": artist, "album": album or name}
+        tagged = _tag_mp3(audio_bytes, song)
+        tagged.seek(0)
 
-    # 上传到管理员私聊获取 file_id，然后删除消息
-    try:
-        msg = await context.bot.send_audio(
-            chat_id=config.ADMIN_ID,
-            audio=audio_bytes,
-            filename=filename,
-            title=song["name"],
-            performer=song["artist"],
-            disable_notification=True,
+        return web.Response(
+            body=tagged.read(),
+            content_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
+                "Cache-Control": "public, max-age=3600",
+            },
         )
-        file_id = msg.audio.file_id
-        try:
-            await context.bot.delete_message(
-                chat_id=config.ADMIN_ID, message_id=msg.message_id
-            )
-        except Exception:
-            pass
     except Exception as e:
-        logger.error(f"上传音频获取file_id失败 {song['id']}: {e}")
-        return None
-
-    return file_id
+        logger.error(f"音频代理失败 song_id={song_id}: {e}")
+        return web.Response(status=500, text=f"Proxy error: {e}")
 
 
 # ============================================================
@@ -543,19 +547,26 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=0, is_personal=True)
         return
 
-    # 限制处理数量，避免超时（最多8首）
+    # 限制结果数量
     valid_songs = valid_songs[:8]
-
-    # 并发下载+打标签+上传所有歌曲（无缓存，每次重新处理）
-    file_id_tasks = [_upload_audio(context, song) for song in valid_songs]
-    file_ids = await asyncio.gather(*file_id_tasks, return_exceptions=True)
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
+    base_url = config.WEBHOOK_URL.rstrip("/") if config.WEBHOOK_URL else ""
 
     results = []
-    for song, file_id in zip(valid_songs, file_ids):
-        if isinstance(file_id, Exception) or not file_id:
+    for song in valid_songs:
+        # 构建音频代理URL（Telegram从此URL拉取带ID3标签的MP3）
+        if base_url:
+            audio_url = (
+                f"{base_url}/audio/{song['id']}"
+                f"?name={quote(song['name'])}"
+                f"&artist={quote(song['artist'])}"
+                f"&album={quote(song.get('album', ''))}"
+                f"&quality={config.MUSIC_QUALITY}"
+            )
+        else:
+            # 无公网URL时无法使用音频代理，跳过
             continue
 
         caption = (
@@ -568,10 +579,10 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         results.append(
             InlineQueryResultAudio(
                 id=str(song["id"]),
-                audio_url=file_id,
+                audio_url=audio_url,
                 title=song["name"],
                 performer=song["artist"],
-                audio_duration=song["duration"] // 1000 if song["duration"] else None,
+                audio_duration=song["duration"] // 1000 if song.get("duration") else None,
                 caption=caption,
                 parse_mode="HTML",
             )
@@ -580,11 +591,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not results:
         results.append(
             InlineQueryResultArticle(
-                id="upload_fail",
-                title=f"「{keyword}」音频处理失败",
-                description="请稍后重试",
+                id="no_result",
+                title=f"「{keyword}」暂无可用结果",
+                description="换个关键词试试",
                 input_message_content=InputTextMessageContent(
-                    f"😢 「{keyword}」音频处理失败，请稍后重试。"
+                    f"😢 「{keyword}」暂无可用结果。"
                 ),
             )
         )
@@ -826,18 +837,55 @@ def main():
     print("=" * 50)
 
     if config.WEBHOOK_URL:
-        # Webhook 模式（Render 等云平台）
         webhook_url = f"{config.WEBHOOK_URL.rstrip('/')}/webhook"
-        print(f"🌐 Webhook 模式")
+        print(f"🌐 Webhook + 音频代理模式")
         print(f"   监听端口: {config.PORT}")
         print(f"   Webhook URL: {webhook_url}")
+        print(f"   音频代理: {config.WEBHOOK_URL.rstrip('/')}/audio/<song_id>")
         print("=" * 50)
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=config.PORT,
-            url_path="webhook",
-            webhook_url=webhook_url,
-        )
+
+        async def run_server():
+            await application.initialize()
+            await application.start()
+            await application.bot.set_webhook(webhook_url)
+
+            app = web.Application()
+
+            async def webhook_handler(request):
+                if request.can_read_body:
+                    try:
+                        data = await request.json()
+                        update = Update.de_json(data, application.bot)
+                        if update:
+                            await application.update_queue.put(update)
+                    except Exception as e:
+                        logger.error(f"Webhook处理失败: {e}")
+                return web.Response(text="OK")
+
+            async def health_handler(request):
+                return web.Response(text="OK")
+
+            app.router.add_post("/webhook", webhook_handler)
+            app.router.add_get("/audio/{song_id}", audio_proxy_handler)
+            app.router.add_get("/", health_handler)
+
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", config.PORT)
+            await site.start()
+            print("✅ 服务器已启动，等待请求...")
+
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except (KeyboardInterrupt, SystemExit):
+                pass
+            finally:
+                await application.stop()
+                await application.shutdown()
+                await runner.cleanup()
+
+        asyncio.run(run_server())
     else:
         # Long Polling 模式（本地调试）
         print("🔄 Long Polling 模式（未设置 WEBHOOK_URL）")
