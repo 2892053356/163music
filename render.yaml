@@ -1,0 +1,18 @@
+services:
+  - type: worker
+    name: netease-telegram-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: NETEASE_COOKIE
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: MUSIC_QUALITY
+        value: standard
+      - key: DEFAULT_WELCOME
+        sync: false
