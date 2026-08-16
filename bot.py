@@ -556,41 +556,45 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
+    # 限制并发数为3，避免Render带宽被占满导致全部超时
+    semaphore = asyncio.Semaphore(3)
+
     # 并发下载+打标签+上传管理员私聊获取file_id，然后自动删除临时消息
     async def _get_inline_file_id(song):
-        try:
-            url = url_map.get(song["id"])
-            if not url:
+        async with semaphore:
+            try:
+                url = url_map.get(song["id"])
+                if not url:
+                    return None
+                # 下载音频
+                resp = await asyncio.to_thread(requests.get, url, timeout=10)
+                if resp.status_code != 200 or len(resp.content) < 1000:
+                    return None
+                audio_bytes = io.BytesIO(resp.content)
+                # 写入ID3标签
+                audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
+                filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+                # 上传到管理员私聊获取file_id
+                msg = await context.bot.send_audio(
+                    chat_id=config.ADMIN_ID,
+                    audio=audio_bytes,
+                    filename=filename,
+                    title=song["name"],
+                    performer=song["artist"],
+                )
+                file_id = msg.audio.file_id
+                # 自动删除管理员私聊中的临时文件
+                await context.bot.delete_message(
+                    chat_id=config.ADMIN_ID, message_id=msg.message_id
+                )
+                return file_id
+            except Exception as e:
+                logger.error(f"内联音频上传失败 {song['name']}: {e}")
                 return None
-            # 下载音频
-            resp = await asyncio.to_thread(requests.get, url, timeout=10)
-            if resp.status_code != 200 or len(resp.content) < 1000:
-                return None
-            audio_bytes = io.BytesIO(resp.content)
-            # 写入ID3标签
-            audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
-            filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-            # 上传到管理员私聊获取file_id
-            msg = await context.bot.send_audio(
-                chat_id=config.ADMIN_ID,
-                audio=audio_bytes,
-                filename=filename,
-                title=song["name"],
-                performer=song["artist"],
-            )
-            file_id = msg.audio.file_id
-            # 自动删除管理员私聊中的临时文件
-            await context.bot.delete_message(
-                chat_id=config.ADMIN_ID, message_id=msg.message_id
-            )
-            return file_id
-        except Exception as e:
-            logger.error(f"内联音频上传失败 {song['name']}: {e}")
-            return None
 
-    # 并发处理所有歌曲，8秒超时（Telegram内联查询约10秒有效期，留2秒余量）
+    # 并发处理，9秒超时（Telegram内联查询约10秒有效期，留1秒余量）
     tasks = [asyncio.create_task(_get_inline_file_id(song)) for song in valid_songs]
-    done, pending = await asyncio.wait(tasks, timeout=8)
+    done, pending = await asyncio.wait(tasks, timeout=9)
 
     # 收集已完成的结果（保持原顺序），未完成的跳过
     file_ids = []
