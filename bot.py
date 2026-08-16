@@ -147,6 +147,9 @@ async def audio_proxy_handler(request):
                 break
         if not play_url:
             return web.Response(status=404, text="Song not available")
+        # 转HTTPS，Render访问HTTP的网易云CDN不稳定
+        if play_url.startswith("http://"):
+            play_url = "https://" + play_url[7:]
 
         # 下载音频
         resp = await asyncio.to_thread(requests.get, play_url, timeout=60)
@@ -333,6 +336,9 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     # 获取播放地址
     try:
         url = await asyncio.to_thread(api.get_first_song_url, song_id, config.MUSIC_QUALITY)
+        # 统一转 HTTPS，Render 访问 HTTP 的网易云CDN不稳定
+        if url and url.startswith("http://"):
+            url = "https://" + url[7:]
     except Exception as e:
         logger.error(f"获取播放地址失败: {e}")
         url = ""
@@ -365,51 +371,55 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         reply_markup=reply_markup,
     )
 
-    # 构建音频代理URL（带ID3标签，Telegram拉取后标题显示正确）
-    base_url = config.WEBHOOK_URL.rstrip("/") if config.WEBHOOK_URL else ""
-    proxy_url = None
-    if base_url:
-        proxy_url = (
-            f"{base_url}/audio/{song_id}"
-            f"?name={quote(song['name'])}"
-            f"&artist={quote(song['artist'])}"
-            f"&album={quote(song.get('album', ''))}"
-            f"&quality={config.MUSIC_QUALITY}"
-        )
-
-    # 方案1：传代理URL，Telegram服务器自己下载（带正确ID3标签，速度快）
+    # 方案1：直传网易云URL，Telegram服务器自己下载（最快，不经过Render）
     sent = False
-    if proxy_url:
-        try:
-            if edit:
-                await update.callback_query.edit_message_text("📤 正在发送音频...")
-                await context.bot.send_audio(
-                    chat_id=update.callback_query.message.chat_id,
-                    audio=proxy_url,
-                    **send_kwargs,
-                )
-                await update.callback_query.delete_message()
-            else:
-                await context.bot.send_audio(
-                    chat_id=update.message.chat_id,
-                    audio=proxy_url,
-                    **send_kwargs,
-                )
-            sent = True
-            logger.info(f"代理URL发送成功: {song['name']}")
-        except Exception as e:
-            logger.warning(f"代理URL发送失败，回退到下载上传: {e}")
+    try:
+        if edit:
+            await update.callback_query.edit_message_text("📤 正在发送音频...")
+            await context.bot.send_audio(
+                chat_id=update.callback_query.message.chat_id,
+                audio=url,
+                **send_kwargs,
+            )
+            await update.callback_query.delete_message()
+        else:
+            await context.bot.send_audio(
+                chat_id=update.message.chat_id,
+                audio=url,
+                **send_kwargs,
+            )
+        sent = True
+        logger.info(f"直传URL发送成功: {song['name']}")
+    except Exception as e:
+        logger.warning(f"直传URL失败，回退到下载上传: {e}")
 
-    # 方案2：回退 - 下载到内存→打标签→上传
+    # 方案2：回退 - 下载到内存→打标签→上传（带重试）
     if not sent:
-        try:
-            if edit:
-                await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-            resp = await asyncio.to_thread(requests_get, url, 60)
-            audio_bytes = io.BytesIO(resp.content)
-            audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
-            filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+        audio_bytes = None
+        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+        for attempt in range(3):
+            try:
+                if edit:
+                    await update.callback_query.edit_message_text(f"📥 正在下载并发送音频...（第{attempt+1}次尝试）")
+                resp = await asyncio.to_thread(requests_get, url, 30)
+                if resp.status_code == 200 and len(resp.content) > 1000:
+                    raw = io.BytesIO(resp.content)
+                    audio_bytes = await asyncio.to_thread(_tag_mp3, raw, song)
+                    break
+                logger.warning(f"下载异常 status={resp.status_code} size={len(resp.content)}")
+            except Exception as e:
+                logger.warning(f"下载第{attempt+1}次失败: {e}")
+                await asyncio.sleep(1)
 
+        if not audio_bytes:
+            err_msg = "❌ 音频下载失败，网易云CDN连接超时，请稍后重试。"
+            if edit:
+                await update.callback_query.edit_message_text(err_msg)
+            else:
+                await update.message.reply_text(err_msg)
+            return
+
+        try:
             if edit:
                 await context.bot.send_audio(
                     chat_id=update.callback_query.message.chat_id,
