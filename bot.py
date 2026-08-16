@@ -997,10 +997,6 @@ def main():
         cookie_source = "环境变量"
     print(f"🍪 Cookie 来源: {cookie_source} (长度: {len(api.get_cookie())})")
 
-    # 每日凌晨4点自动刷新 cookie
-    from datetime import time as dt_time
-    application.job_queue.run_daily(refresh_cookie_job, time=dt_time(hour=4, minute=0))
-
     print("✅ Bot 已启动")
     print(f"👑 管理员 ID: {config.ADMIN_ID}")
     print(f"🎵 音质等级: {config.MUSIC_QUALITY}")
@@ -1045,6 +1041,28 @@ def main():
             site = web.TCPSite(runner, "0.0.0.0", config.PORT)
             await site.start()
             print("✅ 服务器已启动，等待请求...")
+
+            # 后台任务：每24小时自动刷新 cookie
+            async def _daily_refresh():
+                while True:
+                    await asyncio.sleep(24 * 3600)
+                    try:
+                        old = api.get_cookie()
+                        new = await asyncio.to_thread(api.refresh_cookie)
+                        if new and new != old:
+                            db.set_cookie(new)
+                            logger.info("Cookie 已自动刷新")
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=config.ADMIN_ID,
+                                    text="🔄 网易云 Cookie 已自动刷新成功"
+                                )
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.error(f"定时刷新失败: {e}")
+
+            asyncio.create_task(_daily_refresh())
 
             try:
                 while True:
