@@ -563,7 +563,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not url:
                 return None
             # 下载音频
-            resp = await asyncio.to_thread(requests.get, url, timeout=20)
+            resp = await asyncio.to_thread(requests.get, url, timeout=10)
             if resp.status_code != 200 or len(resp.content) < 1000:
                 return None
             audio_bytes = io.BytesIO(resp.content)
@@ -588,9 +588,18 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"内联音频上传失败 {song['name']}: {e}")
             return None
 
-    # 并发处理所有歌曲
-    tasks = [_get_inline_file_id(song) for song in valid_songs]
-    file_ids = await asyncio.gather(*tasks)
+    # 并发处理所有歌曲，8秒超时（Telegram内联查询约10秒有效期，留2秒余量）
+    tasks = [asyncio.create_task(_get_inline_file_id(song)) for song in valid_songs]
+    done, pending = await asyncio.wait(tasks, timeout=8)
+
+    # 收集已完成的结果（保持原顺序），未完成的跳过
+    file_ids = []
+    for i, task in enumerate(tasks):
+        if task in done and not task.cancelled() and task.exception() is None:
+            file_ids.append(task.result())
+        else:
+            file_ids.append(None)
+            logger.warning(f"内联歌曲超时未完成: {valid_songs[i]['name']}")
 
     # 构建结果（用file_id，Telegram直接从自己服务器发送，无需访问外部URL）
     results = []
