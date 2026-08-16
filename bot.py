@@ -24,6 +24,7 @@ from telegram import (
     Update,
     InlineQueryResultArticle,
     InlineQueryResultAudio,
+    InlineQueryResultCachedAudio,
     InputTextMessageContent,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -33,6 +34,8 @@ from telegram.ext import (
     CommandHandler,
     InlineQueryHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 from telegram.request import HTTPXRequest
@@ -548,41 +551,62 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 限制结果数量
-    valid_songs = valid_songs[:8]
+    valid_songs = valid_songs[:10]
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
-    base_url = config.WEBHOOK_URL.rstrip("/") if config.WEBHOOK_URL else ""
 
-    results = []
-    for song in valid_songs:
-        # 构建音频代理URL（Telegram从此URL拉取带ID3标签的MP3）
-        if base_url:
-            audio_url = (
-                f"{base_url}/audio/{song['id']}"
-                f"?name={quote(song['name'])}"
-                f"&artist={quote(song['artist'])}"
-                f"&album={quote(song.get('album', ''))}"
-                f"&quality={config.MUSIC_QUALITY}"
+    # 并发下载+打标签+上传管理员私聊获取file_id，然后自动删除临时消息
+    async def _get_inline_file_id(song):
+        try:
+            url = url_map.get(song["id"])
+            if not url:
+                return None
+            # 下载音频
+            resp = await asyncio.to_thread(requests.get, url, timeout=20)
+            if resp.status_code != 200 or len(resp.content) < 1000:
+                return None
+            audio_bytes = io.BytesIO(resp.content)
+            # 写入ID3标签
+            audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
+            filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+            # 上传到管理员私聊获取file_id
+            msg = await context.bot.send_audio(
+                chat_id=config.ADMIN_ID,
+                audio=audio_bytes,
+                filename=filename,
+                title=song["name"],
+                performer=song["artist"],
             )
-        else:
-            # 无公网URL时无法使用音频代理，跳过
-            continue
+            file_id = msg.audio.file_id
+            # 自动删除管理员私聊中的临时文件
+            await context.bot.delete_message(
+                chat_id=config.ADMIN_ID, message_id=msg.message_id
+            )
+            return file_id
+        except Exception as e:
+            logger.error(f"内联音频上传失败 {song['name']}: {e}")
+            return None
 
+    # 并发处理所有歌曲
+    tasks = [_get_inline_file_id(song) for song in valid_songs]
+    file_ids = await asyncio.gather(*tasks)
+
+    # 构建结果（用file_id，Telegram直接从自己服务器发送，无需访问外部URL）
+    results = []
+    for song, file_id in zip(valid_songs, file_ids):
+        if not file_id:
+            continue
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
             f"💿 {song['album']}"
             f"{via_line}"
         )
-
         results.append(
-            InlineQueryResultAudio(
+            InlineQueryResultCachedAudio(
                 id=str(song["id"]),
-                audio_url=audio_url,
-                title=song["name"],
-                performer=song["artist"],
-                audio_duration=song["duration"] // 1000 if song.get("duration") else None,
+                audio_file_id=file_id,
                 caption=caption,
                 parse_mode="HTML",
             )
@@ -623,7 +647,12 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 <b>欢迎语设置</b>\n"
         "✏️ /setwelcome 文本 — 设置欢迎语（支持HTML、{username}）\n"
         "👁 /viewwelcome — 查看当前欢迎语\n"
-        "🔄 /resetwelcome — 恢复默认欢迎语"
+        "🔄 /resetwelcome — 恢复默认欢迎语\n\n"
+        "🍪 <b>Cookie 管理</b>\n"
+        "📋 /cookie — 查看 Cookie 状态\n"
+        "🔄 /refreshcookie — 手动刷新 Cookie\n"
+        "✏️ /setcookie 值 — 手动设置 Cookie\n"
+        "📎 也可直接上传 .txt 文件或粘贴长文本自动设置"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -776,6 +805,154 @@ async def cmd_resetwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# Cookie 管理（自动刷新 + 管理员手动管理）
+# ============================================================
+async def refresh_cookie_job(context: ContextTypes.DEFAULT_TYPE):
+    """定时任务：自动刷新网易云 cookie"""
+    try:
+        old_cookie = api.get_cookie()
+        new_cookie = await asyncio.to_thread(api.refresh_cookie)
+        if new_cookie and new_cookie != old_cookie:
+            db.set_cookie(new_cookie)
+            logger.info("Cookie 已自动刷新")
+            try:
+                await context.bot.send_message(
+                    chat_id=config.ADMIN_ID,
+                    text="🔄 网易云 Cookie 已自动刷新成功"
+                )
+            except Exception:
+                pass
+        else:
+            logger.info("Cookie 刷新未返回新值，保持当前")
+    except Exception as e:
+        logger.error(f"Cookie 自动刷新失败: {e}")
+        try:
+            await context.bot.send_message(
+                chat_id=config.ADMIN_ID,
+                text=f"⚠️ Cookie 自动刷新失败: {e}\n请使用 /setcookie 手动更新"
+            )
+        except Exception:
+            pass
+
+
+async def cmd_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员查看 cookie 状态"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    cookie = api.get_cookie()
+    updated_at = db.get_cookie_updated_at()
+    is_valid = await asyncio.to_thread(api.check_cookie_valid)
+
+    msg = "📋 <b>Cookie 状态</b>\n"
+    msg += f"状态: {'✅ 有效' if is_valid else '❌ 可能已过期'}\n"
+    if cookie:
+        msg += f"前20位: <code>{cookie[:20]}</code>...\n"
+        msg += f"总长度: {len(cookie)}\n"
+    else:
+        msg += "Cookie: 未设置\n"
+    if updated_at:
+        from datetime import datetime as dt
+        msg += f"更新时间: {dt.fromtimestamp(updated_at).strftime('%Y-%m-%d %H:%M:%S')}\n"
+    msg += "\n💡 命令: /refreshcookie 手动刷新，/setcookie 值 手动设置"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_setcookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员手动设置 cookie"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    new_cookie = " ".join(context.args).strip()
+    if not new_cookie:
+        await update.message.reply_text("用法: /setcookie <cookie值>")
+        return
+    api.update_cookie(new_cookie)
+    db.set_cookie(new_cookie)
+    await update.message.reply_text(f"✅ Cookie 已更新\n前20位: <code>{new_cookie[:20]}</code>...", parse_mode="HTML")
+
+
+async def cmd_refreshcookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员手动刷新 cookie"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    await update.message.reply_text("🔄 正在刷新 Cookie...")
+    try:
+        old = api.get_cookie()
+        new = await asyncio.to_thread(api.refresh_cookie)
+        if new and new != old:
+            db.set_cookie(new)
+            await update.message.reply_text(f"✅ Cookie 已刷新\n前20位: <code>{new[:20]}</code>...", parse_mode="HTML")
+        else:
+            await update.message.reply_text("⚠️ 刷新未返回新 Cookie，可能已过期需要重新登录获取后用 /setcookie 设置")
+    except Exception as e:
+        await update.message.reply_text(f"❌ 刷新失败: {e}")
+
+
+async def handle_admin_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员上传文本文件设置 cookie（支持 .txt 文件，内容为 MUSIC_U value）"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        return
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    # 只处理文本文件
+    filename = doc.file_name or ""
+    if not filename.lower().endswith(".txt"):
+        await update.message.reply_text("⚠️ 请上传 .txt 文本文件，内容为 MUSIC_U 的 value 值。")
+        return
+
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        # 下载到内存
+        file_bytes = await file.download_as_bytearray()
+        content = file_bytes.decode("utf-8").strip()
+        # 去除可能的换行、空格、引号
+        content = content.strip().strip('"').strip("'").strip()
+
+        if len(content) < 50:
+            await update.message.reply_text(f"⚠️ 文件内容过短（长度{len(content)}），看起来不像有效的 cookie。")
+            return
+
+        api.update_cookie(content)
+        db.set_cookie(content)
+        await update.message.reply_text(
+            f"✅ 已从文件更新 Cookie\n"
+            f"文件名: {filename}\n"
+            f"长度: {len(content)}\n"
+            f"前20位: <code>{content[:20]}</code>...",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ 读取文件失败: {e}")
+
+
+async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员直接发送长文本时自动识别为 cookie 并设置"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        return
+
+    text = update.message.text.strip()
+    # 识别为 cookie 的条件：长度 > 100 且为十六进制字符
+    if len(text) > 100 and all(c in "0123456789abcdefABCDEF" for c in text):
+        api.update_cookie(text)
+        db.set_cookie(text)
+        await update.message.reply_text(
+            f"✅ 已识别并设置 Cookie\n长度: {len(text)}\n前20位: <code>{text[:20]}</code>...",
+            parse_mode="HTML",
+        )
+
+
+# ============================================================
 # 错误处理
 # ============================================================
 
@@ -820,6 +997,14 @@ def main():
     application.add_handler(CommandHandler("setwelcome", cmd_setwelcome))
     application.add_handler(CommandHandler("viewwelcome", cmd_viewwelcome))
     application.add_handler(CommandHandler("resetwelcome", cmd_resetwelcome))
+    application.add_handler(CommandHandler("cookie", cmd_cookie))
+    application.add_handler(CommandHandler("setcookie", cmd_setcookie))
+    application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
+
+    # 管理员上传 .txt 文件设置 cookie
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_admin_document))
+    # 管理员直接发送长十六进制文本自动识别为 cookie
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
 
     # 内联搜索
     application.add_handler(InlineQueryHandler(handle_inline_query))
@@ -829,6 +1014,15 @@ def main():
 
     # 错误
     application.add_error_handler(error_handler)
+
+    # 从 Redis 加载 cookie（优先于环境变量，支持运行时更新）
+    saved_cookie = db.get_cookie()
+    if saved_cookie:
+        api.update_cookie(saved_cookie)
+        cookie_source = "数据库"
+    else:
+        cookie_source = "环境变量"
+    print(f"🍪 Cookie 来源: {cookie_source} (长度: {len(api.get_cookie())})")
 
     print("✅ Bot 已启动")
     print(f"👑 管理员 ID: {config.ADMIN_ID}")
@@ -874,6 +1068,28 @@ def main():
             site = web.TCPSite(runner, "0.0.0.0", config.PORT)
             await site.start()
             print("✅ 服务器已启动，等待请求...")
+
+            # 后台任务：每24小时自动刷新 cookie
+            async def _daily_refresh():
+                while True:
+                    await asyncio.sleep(24 * 3600)
+                    try:
+                        old = api.get_cookie()
+                        new = await asyncio.to_thread(api.refresh_cookie)
+                        if new and new != old:
+                            db.set_cookie(new)
+                            logger.info("Cookie 已自动刷新")
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=config.ADMIN_ID,
+                                    text="🔄 网易云 Cookie 已自动刷新成功"
+                                )
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.error(f"定时刷新失败: {e}")
+
+            asyncio.create_task(_daily_refresh())
 
             try:
                 while True:
