@@ -556,60 +556,16 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
-    # 限制并发数为3，避免Render带宽被占满导致全部超时
-    semaphore = asyncio.Semaphore(3)
-
-    # 并发下载+打标签+上传管理员私聊获取file_id，然后自动删除临时消息
-    async def _get_inline_file_id(song):
-        async with semaphore:
-            try:
-                url = url_map.get(song["id"])
-                if not url:
-                    return None
-                # 下载音频
-                resp = await asyncio.to_thread(requests.get, url, timeout=10)
-                if resp.status_code != 200 or len(resp.content) < 1000:
-                    return None
-                audio_bytes = io.BytesIO(resp.content)
-                # 写入ID3标签
-                audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
-                filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-                # 上传到管理员私聊获取file_id
-                msg = await context.bot.send_audio(
-                    chat_id=config.ADMIN_ID,
-                    audio=audio_bytes,
-                    filename=filename,
-                    title=song["name"],
-                    performer=song["artist"],
-                )
-                file_id = msg.audio.file_id
-                # 自动删除管理员私聊中的临时文件
-                await context.bot.delete_message(
-                    chat_id=config.ADMIN_ID, message_id=msg.message_id
-                )
-                return file_id
-            except Exception as e:
-                logger.error(f"内联音频上传失败 {song['name']}: {e}")
-                return None
-
-    # 并发处理，9秒超时（Telegram内联查询约10秒有效期，留1秒余量）
-    tasks = [asyncio.create_task(_get_inline_file_id(song)) for song in valid_songs]
-    done, pending = await asyncio.wait(tasks, timeout=9)
-
-    # 收集已完成的结果（保持原顺序），未完成的跳过
-    file_ids = []
-    for i, task in enumerate(tasks):
-        if task in done and not task.cancelled() and task.exception() is None:
-            file_ids.append(task.result())
-        else:
-            file_ids.append(None)
-            logger.warning(f"内联歌曲超时未完成: {valid_songs[i]['name']}")
-
-    # 构建结果（用file_id，Telegram直接从自己服务器发送，无需访问外部URL）
+    # 直接用网易云URL，Telegram服务器自己下载，不经过Render（避免Render带宽不足超时）
     results = []
-    for song, file_id in zip(valid_songs, file_ids):
-        if not file_id:
+    for song in valid_songs:
+        url = url_map.get(song["id"])
+        if not url:
             continue
+        # 转HTTPS（Telegram要求HTTPS）
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
@@ -617,9 +573,12 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"{via_line}"
         )
         results.append(
-            InlineQueryResultCachedAudio(
+            InlineQueryResultAudio(
                 id=str(song["id"]),
-                audio_file_id=file_id,
+                audio_url=url,
+                title=song["name"],
+                performer=song["artist"],
+                audio_duration=song["duration"] // 1000 if song.get("duration") else None,
                 caption=caption,
                 parse_mode="HTML",
             )
