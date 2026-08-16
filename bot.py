@@ -18,7 +18,6 @@ import requests
 from datetime import datetime
 from urllib.parse import quote
 
-import aiohttp
 from aiohttp import web
 
 from telegram import (
@@ -119,11 +118,13 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
 
 async def audio_proxy_handler(request):
     """
-    音频代理端点：流式转发网易云MP3，边下载边返回，避免大文件超时。
-    内联搜索通过此URL让 Telegram 拉取音频。
+    音频代理端点：根据 song_id 从网易云下载MP3，写入ID3标签后返回。
+    内联搜索通过此URL让 Telegram 直接拉取音频，无需先上传到管理员私聊。
     """
     song_id = request.match_info.get("song_id")
     name = request.query.get("name", "未知歌曲")
+    artist = request.query.get("artist", "未知艺术家")
+    album = request.query.get("album", "")
     quality = request.query.get("quality", config.MUSIC_QUALITY)
 
     try:
@@ -132,8 +133,8 @@ async def audio_proxy_handler(request):
         return web.Response(status=400, text="Invalid song_id")
 
     try:
-        # 获取播放地址（同步调用，用to_thread避免阻塞）
-        url_result = await asyncio.to_thread(api.get_song_url, [sid], level=quality)
+        # 获取播放地址
+        url_result = api.get_song_url([sid], level=quality)
         play_url = None
         for item in url_result.get("data", []):
             if item.get("id") == sid:
@@ -142,31 +143,25 @@ async def audio_proxy_handler(request):
         if not play_url:
             return web.Response(status=404, text="Song not available")
 
-        # 流式转发：用aiohttp请求网易云，边下载边返回给Telegram
-        timeout = aiohttp.ClientTimeout(total=60, connect=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(play_url) as resp:
-                if resp.status != 200:
-                    return web.Response(status=502, text=f"Upstream error: {resp.status}")
+        # 下载音频
+        resp = await asyncio.to_thread(requests.get, play_url, timeout=60)
+        if resp.status_code != 200:
+            return web.Response(status=502, text="Failed to download audio")
+        audio_bytes = io.BytesIO(resp.content)
 
-                # 构建流式响应
-                response = web.StreamResponse(
-                    status=200,
-                    headers={
-                        "Content-Type": "audio/mpeg",
-                        "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
-                        "Cache-Control": "public, max-age=3600",
-                        "Accept-Ranges": "none",
-                    },
-                )
-                await response.prepare(request)
+        # 写入ID3标签
+        song = {"id": sid, "name": name, "artist": artist, "album": album or name}
+        tagged = _tag_mp3(audio_bytes, song)
+        tagged.seek(0)
 
-                # 逐块转发
-                async for chunk in resp.content.iter_chunked(65536):
-                    await response.write(chunk)
-
-                await response.write_eof()
-                return response
+        return web.Response(
+            body=tagged.read(),
+            content_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
+                "Cache-Control": "public, max-age=3600",
+            },
+        )
     except Exception as e:
         logger.error(f"音频代理失败 song_id={song_id}: {e}")
         return web.Response(status=500, text=f"Proxy error: {e}")
@@ -561,18 +556,16 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
-    # 使用音频代理URL（Render流式转发网易云MP3），避免网易云CDN对Telegram海外IP限制
-    base_url = config.WEBHOOK_URL.rstrip("/") if config.WEBHOOK_URL else ""
+    # 直接用网易云URL，Telegram服务器自己下载，不经过Render（避免Render带宽不足超时）
     results = []
     for song in valid_songs:
-        if not base_url:
+        url = url_map.get(song["id"])
+        if not url:
             continue
-        # 构建音频代理URL
-        audio_url = (
-            f"{base_url}/audio/{song['id']}"
-            f"?name={quote(song['name'])}"
-            f"&quality={config.MUSIC_QUALITY}"
-        )
+        # 转HTTPS（Telegram要求HTTPS）
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
@@ -582,7 +575,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         results.append(
             InlineQueryResultAudio(
                 id=str(song["id"]),
-                audio_url=audio_url,
+                audio_url=url,
                 title=song["name"],
                 performer=song["artist"],
                 audio_duration=song["duration"] // 1000 if song.get("duration") else None,
