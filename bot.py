@@ -299,38 +299,53 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id: int, edit: bool = False):
     """获取歌曲信息，下载音频并发送（带歌词按钮）"""
-    # 获取歌曲详情
-    try:
-        detail = api.get_song_detail([song_id])
-        songs_detail = detail.get("songs", [])
-        if not songs_detail:
-            if edit:
-                await update.callback_query.edit_message_text("❌ 未找到该歌曲信息。")
-            else:
-                await update.message.reply_text("❌ 未找到该歌曲信息。")
-            return
-
-        sd = songs_detail[0]
-        song = {
-            "id": sd["id"],
-            "name": sd["name"],
-            "artist": "/".join(a["name"] for a in sd.get("ar", [])),
-            "album": sd.get("al", {}).get("name", ""),
-            "cover": sd.get("al", {}).get("picUrl", ""),
-            "duration": sd.get("dt", 0),
-        }
-    except Exception as e:
-        logger.error(f"获取歌曲详情失败: {e}")
+    # 获取歌曲详情（同步调用用to_thread+重试，避免阻塞事件循环和网络抖动）
+    detail = None
+    for attempt in range(3):
+        try:
+            detail = await asyncio.to_thread(api.get_song_detail, [song_id])
+            break
+        except Exception as e:
+            logger.warning(f"获取歌曲详情 第{attempt+1}次失败: {e}")
+            if attempt < 2:
+                await asyncio.sleep(1)
+    if not detail:
+        logger.error("获取歌曲详情失败（3次重试后）")
         if edit:
-            await update.callback_query.edit_message_text("❌ 获取歌曲信息失败。")
+            await update.callback_query.edit_message_text("❌ 获取歌曲信息失败，请稍后重试。")
+        else:
+            await update.message.reply_text("❌ 获取歌曲信息失败，请稍后重试。")
         return
 
-    # 获取播放地址
-    try:
-        url = api.get_first_song_url(song_id, level=config.MUSIC_QUALITY)
-    except Exception as e:
-        logger.error(f"获取播放地址失败: {e}")
-        url = ""
+    songs_detail = detail.get("songs", [])
+    if not songs_detail:
+        if edit:
+            await update.callback_query.edit_message_text("❌ 未找到该歌曲信息。")
+        else:
+            await update.message.reply_text("❌ 未找到该歌曲信息。")
+        return
+
+    sd = songs_detail[0]
+    song = {
+        "id": sd["id"],
+        "name": sd["name"],
+        "artist": "/".join(a["name"] for a in sd.get("ar", [])),
+        "album": sd.get("al", {}).get("name", ""),
+        "cover": sd.get("al", {}).get("picUrl", ""),
+        "duration": sd.get("dt", 0),
+    }
+
+    # 获取播放地址（to_thread+重试）
+    url = ""
+    for attempt in range(3):
+        try:
+            url = await asyncio.to_thread(api.get_first_song_url, song_id, level=config.MUSIC_QUALITY)
+            if url:
+                break
+        except Exception as e:
+            logger.warning(f"获取播放地址 第{attempt+1}次失败: {e}")
+            if attempt < 2:
+                await asyncio.sleep(1)
 
     if not url:
         msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
@@ -342,22 +357,33 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     db.incr_play()
 
-    # 下载音频到内存，自定义文件名
-    try:
-        if edit:
-            await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-        resp = requests_get(url, timeout=60)
-        audio_bytes = io.BytesIO(resp.content)
-        # 写入ID3标签，确保Telegram显示正确的标题和艺术家
-        audio_bytes = _tag_mp3(audio_bytes, song)
-        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-    except Exception as e:
-        logger.error(f"下载音频失败: {e}")
+    # 下载音频到内存（to_thread+重试），自定义文件名
+    resp = None
+    for attempt in range(3):
+        try:
+            if edit and attempt == 0:
+                await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
+            resp = await asyncio.to_thread(requests_get, url, 60)
+            if resp and resp.status_code == 200:
+                break
+            resp = None
+        except Exception as e:
+            logger.warning(f"下载音频 第{attempt+1}次失败: {e}")
+            if attempt < 2:
+                await asyncio.sleep(1)
+
+    if not resp:
+        logger.error("下载音频失败（3次重试后）")
         if edit:
             await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
         else:
             await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
         return
+
+    audio_bytes = io.BytesIO(resp.content)
+    # 写入ID3标签，确保Telegram显示正确的标题和艺术家
+    audio_bytes = _tag_mp3(audio_bytes, song)
+    filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
 
     caption = _song_caption(song)
 
