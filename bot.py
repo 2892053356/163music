@@ -100,19 +100,25 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
         from mutagen.mp3 import MP3
         from mutagen.id3 import ID3, TIT2, TPE1, TALB
         audio_bytes.seek(0)
-        audio = MP3(audio_bytes)
+        original_data = audio_bytes.read()
+        src = io.BytesIO(original_data)
+        audio = MP3(src)
         if audio.tags is None:
             audio.add_tags()
         audio.tags.add(TIT2(encoding=3, text=[song["name"]]))
         audio.tags.add(TPE1(encoding=3, text=[song["artist"]]))
         audio.tags.add(TALB(encoding=3, text=[song["album"]]))
-        audio_bytes.seek(0)
-        audio.save(audio_bytes)
-        audio_bytes.seek(0)
+        out = io.BytesIO()
+        audio.save(out, v2_version=3)
+        out.seek(0)
+        if len(out.getvalue()) < len(original_data) * 0.5:
+            logger.warning(f"ID3标签后文件异常缩小，使用原始文件")
+            return io.BytesIO(original_data)
+        return out
     except Exception as e:
         logger.warning(f"写入ID3标签失败: {e}")
         audio_bytes.seek(0)
-    return audio_bytes
+        return audio_bytes
 
 
 async def audio_proxy_handler(request):
@@ -133,7 +139,7 @@ async def audio_proxy_handler(request):
 
     try:
         # 获取播放地址
-        url_result = api.get_song_url([sid], level=quality)
+        url_result = await asyncio.to_thread(api.get_song_url, [sid], level=quality)
         play_url = None
         for item in url_result.get("data", []):
             if item.get("id") == sid:
@@ -345,7 +351,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     try:
         if edit:
             await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-        resp = requests_get(url, timeout=60)
+        resp = await asyncio.to_thread(requests_get, url, 60)
         audio_bytes = io.BytesIO(resp.content)
         # 写入ID3标签，确保Telegram显示正确的标题和艺术家
         audio_bytes = _tag_mp3(audio_bytes, song)
