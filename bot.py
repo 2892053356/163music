@@ -203,7 +203,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 <b>使用方法：</b>\n"
         "1️⃣ /music 歌曲名 — 搜索并播放歌曲\n"
         "2️⃣ 内联搜索：在任意聊天输入 <code>@本机器人用户名 歌曲名</code>\n\n"
-        "💡 试试：/music 周杰伦 晴天"
+        "💡 试试：/music 邓紫棋 泡沫"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -489,7 +489,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             InlineQueryResultArticle(
                 id="tip",
                 title="输入歌曲名或歌手名开始搜索",
-                description="例如：周杰伦 晴天",
+                description="例如：邓紫棋 泡沫",
                 input_message_content=InputTextMessageContent(
                     "🎵 在输入框中继续输入歌曲名即可搜索~"
                 ),
@@ -570,7 +570,8 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
             f"💿 {song['album']}"
-            f"{via_line}"
+            f"{via_line}\n\n"
+            f"💡 一次发送不成功请再试一次"
         )
         results.append(
             InlineQueryResultAudio(
