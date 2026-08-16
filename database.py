@@ -4,6 +4,7 @@ Upstash Redis 数据库封装
 """
 
 import json
+import time
 import requests
 import config
 
@@ -82,6 +83,19 @@ class UpstashDB:
         if result and isinstance(result, list):
             return {result[i]: int(result[i + 1]) for i in range(0, len(result), 2)}
         return {"total_searches": 0, "total_plays": 0}
+
+    # ---- Cookie 存储（运行时可更新） ----
+    def get_cookie(self) -> str:
+        result = self._exec("GET", "bot:cookie")
+        return result if result else ""
+
+    def set_cookie(self, cookie: str):
+        self._exec("SET", "bot:cookie", cookie)
+        self._exec("SET", "bot:cookie_updated_at", str(int(time.time())))
+
+    def get_cookie_updated_at(self) -> int:
+        result = self._exec("GET", "bot:cookie_updated_at")
+        return int(result) if result else 0
 
 
 # 全局实例
