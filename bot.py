@@ -306,7 +306,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     """获取歌曲信息，下载音频并发送（带歌词按钮）"""
     # 获取歌曲详情
     try:
-        detail = api.get_song_detail([song_id])
+        detail = await asyncio.to_thread(api.get_song_detail, [song_id])
         songs_detail = detail.get("songs", [])
         if not songs_detail:
             if edit:
@@ -332,7 +332,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     # 获取播放地址
     try:
-        url = api.get_first_song_url(song_id, level=config.MUSIC_QUALITY)
+        url = await asyncio.to_thread(api.get_first_song_url, song_id, config.MUSIC_QUALITY)
     except Exception as e:
         logger.error(f"获取播放地址失败: {e}")
         url = ""
@@ -347,26 +347,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     db.incr_play()
 
-    # 下载音频到内存，自定义文件名
-    try:
-        if edit:
-            await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-        resp = await asyncio.to_thread(requests_get, url, 60)
-        audio_bytes = io.BytesIO(resp.content)
-        # 写入ID3标签，确保Telegram显示正确的标题和艺术家
-        audio_bytes = _tag_mp3(audio_bytes, song)
-        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-    except Exception as e:
-        logger.error(f"下载音频失败: {e}")
-        if edit:
-            await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
-        else:
-            await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
-        return
-
     caption = _song_caption(song)
-
-    # 仅在私聊中显示歌词按钮
     chat = update.effective_chat
     reply_markup = None
     if chat and chat.type == "private":
@@ -374,44 +355,70 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             InlineKeyboardButton("📝 获取歌词", callback_data=f"lyric:{song_id}")
         ]])
 
+    send_kwargs = dict(
+        title=song["name"],
+        performer=song["artist"],
+        caption=caption,
+        parse_mode="HTML",
+        thumbnail=song["cover"] if song["cover"] else None,
+        duration=song["duration"] // 1000 if song["duration"] else None,
+        reply_markup=reply_markup,
+    )
+
+    # 方案1：直接传URL，Telegram服务器自己下载（最快，省去bot中转）
+    sent = False
     try:
         if edit:
+            await update.callback_query.edit_message_text("📤 正在发送音频...")
             await context.bot.send_audio(
                 chat_id=update.callback_query.message.chat_id,
-                audio=audio_bytes,
-                filename=filename,
-                title=song["name"],
-                performer=song["artist"],
-                caption=caption,
-                parse_mode="HTML",
-                thumbnail=song["cover"] if song["cover"] else None,
-                duration=song["duration"] // 1000 if song["duration"] else None,
-                reply_markup=reply_markup,
+                audio=url,
+                **send_kwargs,
             )
             await update.callback_query.delete_message()
         else:
             await context.bot.send_audio(
                 chat_id=update.message.chat_id,
-                audio=audio_bytes,
-                filename=filename,
-                title=song["name"],
-                performer=song["artist"],
-                caption=caption,
-                parse_mode="HTML",
-                thumbnail=song["cover"] if song["cover"] else None,
-                duration=song["duration"] // 1000 if song["duration"] else None,
-                reply_markup=reply_markup,
+                audio=url,
+                **send_kwargs,
             )
+        sent = True
+        logger.info(f"直传URL发送成功: {song['name']}")
     except Exception as e:
-        logger.error(f"发送音频失败: {e}")
-        if edit:
-            await update.callback_query.edit_message_text(
-                "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
-            )
-        else:
-            await update.message.reply_text(
-                "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
-            )
+        logger.warning(f"直传URL失败，回退到下载上传: {e}")
+
+    # 方案2：回退 - 下载到内存→打标签→上传
+    if not sent:
+        try:
+            if edit:
+                await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
+            resp = await asyncio.to_thread(requests_get, url, 60)
+            audio_bytes = io.BytesIO(resp.content)
+            audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
+            filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+
+            if edit:
+                await context.bot.send_audio(
+                    chat_id=update.callback_query.message.chat_id,
+                    audio=audio_bytes,
+                    filename=filename,
+                    **send_kwargs,
+                )
+                await update.callback_query.delete_message()
+            else:
+                await context.bot.send_audio(
+                    chat_id=update.message.chat_id,
+                    audio=audio_bytes,
+                    filename=filename,
+                    **send_kwargs,
+                )
+        except Exception as e:
+            logger.error(f"发送音频失败: {e}")
+            err_msg = "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
+            if edit:
+                await update.callback_query.edit_message_text(err_msg)
+            else:
+                await update.message.reply_text(err_msg)
 
 
 def requests_get(url: str, timeout: int = 60):
