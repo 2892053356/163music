@@ -365,27 +365,40 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         reply_markup=reply_markup,
     )
 
-    # 方案1：直接传URL，Telegram服务器自己下载（最快，省去bot中转）
+    # 构建音频代理URL（带ID3标签，Telegram拉取后标题显示正确）
+    base_url = config.WEBHOOK_URL.rstrip("/") if config.WEBHOOK_URL else ""
+    proxy_url = None
+    if base_url:
+        proxy_url = (
+            f"{base_url}/audio/{song_id}"
+            f"?name={quote(song['name'])}"
+            f"&artist={quote(song['artist'])}"
+            f"&album={quote(song.get('album', ''))}"
+            f"&quality={config.MUSIC_QUALITY}"
+        )
+
+    # 方案1：传代理URL，Telegram服务器自己下载（带正确ID3标签，速度快）
     sent = False
-    try:
-        if edit:
-            await update.callback_query.edit_message_text("📤 正在发送音频...")
-            await context.bot.send_audio(
-                chat_id=update.callback_query.message.chat_id,
-                audio=url,
-                **send_kwargs,
-            )
-            await update.callback_query.delete_message()
-        else:
-            await context.bot.send_audio(
-                chat_id=update.message.chat_id,
-                audio=url,
-                **send_kwargs,
-            )
-        sent = True
-        logger.info(f"直传URL发送成功: {song['name']}")
-    except Exception as e:
-        logger.warning(f"直传URL失败，回退到下载上传: {e}")
+    if proxy_url:
+        try:
+            if edit:
+                await update.callback_query.edit_message_text("📤 正在发送音频...")
+                await context.bot.send_audio(
+                    chat_id=update.callback_query.message.chat_id,
+                    audio=proxy_url,
+                    **send_kwargs,
+                )
+                await update.callback_query.delete_message()
+            else:
+                await context.bot.send_audio(
+                    chat_id=update.message.chat_id,
+                    audio=proxy_url,
+                    **send_kwargs,
+                )
+            sent = True
+            logger.info(f"代理URL发送成功: {song['name']}")
+        except Exception as e:
+            logger.warning(f"代理URL发送失败，回退到下载上传: {e}")
 
     # 方案2：回退 - 下载到内存→打标签→上传
     if not sent:
