@@ -33,8 +33,6 @@ from telegram.ext import (
     CommandHandler,
     InlineQueryHandler,
     CallbackQueryHandler,
-    MessageHandler,
-    filters,
     ContextTypes,
 )
 from telegram.request import HTTPXRequest
@@ -100,25 +98,19 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
         from mutagen.mp3 import MP3
         from mutagen.id3 import ID3, TIT2, TPE1, TALB
         audio_bytes.seek(0)
-        original_data = audio_bytes.read()
-        src = io.BytesIO(original_data)
-        audio = MP3(src)
+        audio = MP3(audio_bytes)
         if audio.tags is None:
             audio.add_tags()
         audio.tags.add(TIT2(encoding=3, text=[song["name"]]))
         audio.tags.add(TPE1(encoding=3, text=[song["artist"]]))
         audio.tags.add(TALB(encoding=3, text=[song["album"]]))
-        out = io.BytesIO()
-        audio.save(out, v2_version=3)
-        out.seek(0)
-        if len(out.getvalue()) < len(original_data) * 0.5:
-            logger.warning(f"ID3标签后文件异常缩小，使用原始文件")
-            return io.BytesIO(original_data)
-        return out
+        audio_bytes.seek(0)
+        audio.save(audio_bytes)
+        audio_bytes.seek(0)
     except Exception as e:
         logger.warning(f"写入ID3标签失败: {e}")
         audio_bytes.seek(0)
-        return audio_bytes
+    return audio_bytes
 
 
 async def audio_proxy_handler(request):
@@ -139,7 +131,7 @@ async def audio_proxy_handler(request):
 
     try:
         # 获取播放地址
-        url_result = await asyncio.to_thread(api.get_song_url, [sid], level=quality)
+        url_result = api.get_song_url([sid], level=quality)
         play_url = None
         for item in url_result.get("data", []):
             if item.get("id") == sid:
@@ -147,9 +139,6 @@ async def audio_proxy_handler(request):
                 break
         if not play_url:
             return web.Response(status=404, text="Song not available")
-        # 转HTTPS，Render访问HTTP的网易云CDN不稳定
-        if play_url.startswith("http://"):
-            play_url = "https://" + play_url[7:]
 
         # 下载音频
         resp = await asyncio.to_thread(requests.get, play_url, timeout=60)
@@ -309,7 +298,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     """获取歌曲信息，下载音频并发送（带歌词按钮）"""
     # 获取歌曲详情
     try:
-        detail = await asyncio.to_thread(api.get_song_detail, [song_id])
+        detail = api.get_song_detail([song_id])
         songs_detail = detail.get("songs", [])
         if not songs_detail:
             if edit:
@@ -335,10 +324,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     # 获取播放地址
     try:
-        url = await asyncio.to_thread(api.get_first_song_url, song_id, config.MUSIC_QUALITY)
-        # 统一转 HTTPS，Render 访问 HTTP 的网易云CDN不稳定
-        if url and url.startswith("http://"):
-            url = "https://" + url[7:]
+        url = api.get_first_song_url(song_id, level=config.MUSIC_QUALITY)
     except Exception as e:
         logger.error(f"获取播放地址失败: {e}")
         url = ""
@@ -353,7 +339,26 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     db.incr_play()
 
+    # 下载音频到内存，自定义文件名
+    try:
+        if edit:
+            await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
+        resp = requests_get(url, timeout=60)
+        audio_bytes = io.BytesIO(resp.content)
+        # 写入ID3标签，确保Telegram显示正确的标题和艺术家
+        audio_bytes = _tag_mp3(audio_bytes, song)
+        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+    except Exception as e:
+        logger.error(f"下载音频失败: {e}")
+        if edit:
+            await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
+        else:
+            await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
+        return
+
     caption = _song_caption(song)
+
+    # 仅在私聊中显示歌词按钮
     chat = update.effective_chat
     reply_markup = None
     if chat and chat.type == "private":
@@ -361,87 +366,44 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             InlineKeyboardButton("📝 获取歌词", callback_data=f"lyric:{song_id}")
         ]])
 
-    send_kwargs = dict(
-        title=song["name"],
-        performer=song["artist"],
-        caption=caption,
-        parse_mode="HTML",
-        thumbnail=song["cover"] if song["cover"] else None,
-        duration=song["duration"] // 1000 if song["duration"] else None,
-        reply_markup=reply_markup,
-    )
-
-    # 方案1：直传网易云URL，Telegram服务器自己下载（最快，不经过Render）
-    sent = False
     try:
         if edit:
-            await update.callback_query.edit_message_text("📤 正在发送音频...")
             await context.bot.send_audio(
                 chat_id=update.callback_query.message.chat_id,
-                audio=url,
-                **send_kwargs,
+                audio=audio_bytes,
+                filename=filename,
+                title=song["name"],
+                performer=song["artist"],
+                caption=caption,
+                parse_mode="HTML",
+                thumbnail=song["cover"] if song["cover"] else None,
+                duration=song["duration"] // 1000 if song["duration"] else None,
+                reply_markup=reply_markup,
             )
             await update.callback_query.delete_message()
         else:
             await context.bot.send_audio(
                 chat_id=update.message.chat_id,
-                audio=url,
-                **send_kwargs,
+                audio=audio_bytes,
+                filename=filename,
+                title=song["name"],
+                performer=song["artist"],
+                caption=caption,
+                parse_mode="HTML",
+                thumbnail=song["cover"] if song["cover"] else None,
+                duration=song["duration"] // 1000 if song["duration"] else None,
+                reply_markup=reply_markup,
             )
-        sent = True
-        logger.info(f"直传URL发送成功: {song['name']}")
     except Exception as e:
-        logger.warning(f"直传URL失败，回退到下载上传: {e}")
-
-    # 方案2：回退 - 下载到内存→打标签→上传（带重试）
-    if not sent:
-        audio_bytes = None
-        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-        for attempt in range(3):
-            try:
-                if edit:
-                    await update.callback_query.edit_message_text(f"📥 正在下载并发送音频...（第{attempt+1}次尝试）")
-                resp = await asyncio.to_thread(requests_get, url, 30)
-                if resp.status_code == 200 and len(resp.content) > 1000:
-                    raw = io.BytesIO(resp.content)
-                    audio_bytes = await asyncio.to_thread(_tag_mp3, raw, song)
-                    break
-                logger.warning(f"下载异常 status={resp.status_code} size={len(resp.content)}")
-            except Exception as e:
-                logger.warning(f"下载第{attempt+1}次失败: {e}")
-                await asyncio.sleep(1)
-
-        if not audio_bytes:
-            err_msg = "❌ 音频下载失败，网易云CDN连接超时，请稍后重试。"
-            if edit:
-                await update.callback_query.edit_message_text(err_msg)
-            else:
-                await update.message.reply_text(err_msg)
-            return
-
-        try:
-            if edit:
-                await context.bot.send_audio(
-                    chat_id=update.callback_query.message.chat_id,
-                    audio=audio_bytes,
-                    filename=filename,
-                    **send_kwargs,
-                )
-                await update.callback_query.delete_message()
-            else:
-                await context.bot.send_audio(
-                    chat_id=update.message.chat_id,
-                    audio=audio_bytes,
-                    filename=filename,
-                    **send_kwargs,
-                )
-        except Exception as e:
-            logger.error(f"发送音频失败: {e}")
-            err_msg = "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
-            if edit:
-                await update.callback_query.edit_message_text(err_msg)
-            else:
-                await update.message.reply_text(err_msg)
+        logger.error(f"发送音频失败: {e}")
+        if edit:
+            await update.callback_query.edit_message_text(
+                "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
+            )
 
 
 def requests_get(url: str, timeout: int = 60):
@@ -661,12 +623,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 <b>欢迎语设置</b>\n"
         "✏️ /setwelcome 文本 — 设置欢迎语（支持HTML、{username}）\n"
         "👁 /viewwelcome — 查看当前欢迎语\n"
-        "🔄 /resetwelcome — 恢复默认欢迎语\n\n"
-        "🍪 <b>Cookie 管理</b>\n"
-        "📋 /cookie — 查看 Cookie 状态\n"
-        "🔄 /refreshcookie — 手动刷新 Cookie\n"
-        "✏️ /setcookie 值 — 手动设置 Cookie\n"
-        "📎 也可直接上传 .txt 文件或粘贴长文本自动设置"
+        "🔄 /resetwelcome — 恢复默认欢迎语"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -819,154 +776,6 @@ async def cmd_resetwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# Cookie 管理（自动刷新 + 管理员手动管理）
-# ============================================================
-async def refresh_cookie_job(context: ContextTypes.DEFAULT_TYPE):
-    """定时任务：自动刷新网易云 cookie"""
-    try:
-        old_cookie = api.get_cookie()
-        new_cookie = await asyncio.to_thread(api.refresh_cookie)
-        if new_cookie and new_cookie != old_cookie:
-            db.set_cookie(new_cookie)
-            logger.info("Cookie 已自动刷新")
-            try:
-                await context.bot.send_message(
-                    chat_id=config.ADMIN_ID,
-                    text="🔄 网易云 Cookie 已自动刷新成功"
-                )
-            except Exception:
-                pass
-        else:
-            logger.info("Cookie 刷新未返回新值，保持当前")
-    except Exception as e:
-        logger.error(f"Cookie 自动刷新失败: {e}")
-        try:
-            await context.bot.send_message(
-                chat_id=config.ADMIN_ID,
-                text=f"⚠️ Cookie 自动刷新失败: {e}\n请使用 /setcookie 手动更新"
-            )
-        except Exception:
-            pass
-
-
-async def cmd_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员查看 cookie 状态"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        await update.message.reply_text("⛔ 权限不足。")
-        return
-
-    cookie = api.get_cookie()
-    updated_at = db.get_cookie_updated_at()
-    is_valid = await asyncio.to_thread(api.check_cookie_valid)
-
-    msg = "📋 <b>Cookie 状态</b>\n"
-    msg += f"状态: {'✅ 有效' if is_valid else '❌ 可能已过期'}\n"
-    if cookie:
-        msg += f"前20位: <code>{cookie[:20]}</code>...\n"
-        msg += f"总长度: {len(cookie)}\n"
-    else:
-        msg += "Cookie: 未设置\n"
-    if updated_at:
-        from datetime import datetime as dt
-        msg += f"更新时间: {dt.fromtimestamp(updated_at).strftime('%Y-%m-%d %H:%M:%S')}\n"
-    msg += "\n💡 命令: /refreshcookie 手动刷新，/setcookie 值 手动设置"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-
-async def cmd_setcookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员手动设置 cookie"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        await update.message.reply_text("⛔ 权限不足。")
-        return
-    new_cookie = " ".join(context.args).strip()
-    if not new_cookie:
-        await update.message.reply_text("用法: /setcookie <cookie值>")
-        return
-    api.update_cookie(new_cookie)
-    db.set_cookie(new_cookie)
-    await update.message.reply_text(f"✅ Cookie 已更新\n前20位: <code>{new_cookie[:20]}</code>...", parse_mode="HTML")
-
-
-async def cmd_refreshcookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员手动刷新 cookie"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        await update.message.reply_text("⛔ 权限不足。")
-        return
-    await update.message.reply_text("🔄 正在刷新 Cookie...")
-    try:
-        old = api.get_cookie()
-        new = await asyncio.to_thread(api.refresh_cookie)
-        if new and new != old:
-            db.set_cookie(new)
-            await update.message.reply_text(f"✅ Cookie 已刷新\n前20位: <code>{new[:20]}</code>...", parse_mode="HTML")
-        else:
-            await update.message.reply_text("⚠️ 刷新未返回新 Cookie，可能已过期需要重新登录获取后用 /setcookie 设置")
-    except Exception as e:
-        await update.message.reply_text(f"❌ 刷新失败: {e}")
-
-
-async def handle_admin_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员上传文本文件设置 cookie（支持 .txt 文件，内容为 MUSIC_U value）"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        return
-
-    doc = update.message.document
-    if not doc:
-        return
-
-    # 只处理文本文件
-    filename = doc.file_name or ""
-    if not filename.lower().endswith(".txt"):
-        await update.message.reply_text("⚠️ 请上传 .txt 文本文件，内容为 MUSIC_U 的 value 值。")
-        return
-
-    try:
-        file = await context.bot.get_file(doc.file_id)
-        # 下载到内存
-        file_bytes = await file.download_as_bytearray()
-        content = file_bytes.decode("utf-8").strip()
-        # 去除可能的换行、空格、引号
-        content = content.strip().strip('"').strip("'").strip()
-
-        if len(content) < 50:
-            await update.message.reply_text(f"⚠️ 文件内容过短（长度{len(content)}），看起来不像有效的 cookie。")
-            return
-
-        api.update_cookie(content)
-        db.set_cookie(content)
-        await update.message.reply_text(
-            f"✅ 已从文件更新 Cookie\n"
-            f"文件名: {filename}\n"
-            f"长度: {len(content)}\n"
-            f"前20位: <code>{content[:20]}</code>...",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ 读取文件失败: {e}")
-
-
-async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员直接发送长文本时自动识别为 cookie 并设置"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        return
-
-    text = update.message.text.strip()
-    # 识别为 cookie 的条件：长度 > 100 且为十六进制字符
-    if len(text) > 100 and all(c in "0123456789abcdefABCDEF" for c in text):
-        api.update_cookie(text)
-        db.set_cookie(text)
-        await update.message.reply_text(
-            f"✅ 已识别并设置 Cookie\n长度: {len(text)}\n前20位: <code>{text[:20]}</code>...",
-            parse_mode="HTML",
-        )
-
-
-# ============================================================
 # 错误处理
 # ============================================================
 
@@ -1011,14 +820,6 @@ def main():
     application.add_handler(CommandHandler("setwelcome", cmd_setwelcome))
     application.add_handler(CommandHandler("viewwelcome", cmd_viewwelcome))
     application.add_handler(CommandHandler("resetwelcome", cmd_resetwelcome))
-    application.add_handler(CommandHandler("cookie", cmd_cookie))
-    application.add_handler(CommandHandler("setcookie", cmd_setcookie))
-    application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
-
-    # 管理员上传 .txt 文件设置 cookie
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_admin_document))
-    # 管理员直接发送长十六进制文本自动识别为 cookie
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
 
     # 内联搜索
     application.add_handler(InlineQueryHandler(handle_inline_query))
@@ -1028,15 +829,6 @@ def main():
 
     # 错误
     application.add_error_handler(error_handler)
-
-    # 从 Redis 加载 cookie（优先于环境变量，支持运行时更新）
-    saved_cookie = db.get_cookie()
-    if saved_cookie:
-        api.update_cookie(saved_cookie)
-        cookie_source = "数据库"
-    else:
-        cookie_source = "环境变量"
-    print(f"🍪 Cookie 来源: {cookie_source} (长度: {len(api.get_cookie())})")
 
     print("✅ Bot 已启动")
     print(f"👑 管理员 ID: {config.ADMIN_ID}")
@@ -1082,28 +874,6 @@ def main():
             site = web.TCPSite(runner, "0.0.0.0", config.PORT)
             await site.start()
             print("✅ 服务器已启动，等待请求...")
-
-            # 后台任务：每24小时自动刷新 cookie
-            async def _daily_refresh():
-                while True:
-                    await asyncio.sleep(24 * 3600)
-                    try:
-                        old = api.get_cookie()
-                        new = await asyncio.to_thread(api.refresh_cookie)
-                        if new and new != old:
-                            db.set_cookie(new)
-                            logger.info("Cookie 已自动刷新")
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=config.ADMIN_ID,
-                                    text="🔄 网易云 Cookie 已自动刷新成功"
-                                )
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        logger.error(f"定时刷新失败: {e}")
-
-            asyncio.create_task(_daily_refresh())
 
             try:
                 while True:
