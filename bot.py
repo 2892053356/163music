@@ -625,7 +625,12 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 <b>欢迎语设置</b>\n"
         "✏️ /setwelcome 文本 — 设置欢迎语（支持HTML、{username}）\n"
         "👁 /viewwelcome — 查看当前欢迎语\n"
-        "🔄 /resetwelcome — 恢复默认欢迎语"
+        "🔄 /resetwelcome — 恢复默认欢迎语\n\n"
+        "🍪 <b>Cookie 管理</b>\n"
+        "📋 /cookie — 查看 Cookie 状态\n"
+        "🔄 /refreshcookie — 手动刷新 Cookie\n"
+        "✏️ /setcookie 值 — 手动设置 Cookie\n"
+        "📎 也可直接上传 .txt 文件或粘贴长文本自动设置"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
