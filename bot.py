@@ -100,19 +100,28 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
         from mutagen.mp3 import MP3
         from mutagen.id3 import ID3, TIT2, TPE1, TALB
         audio_bytes.seek(0)
-        audio = MP3(audio_bytes)
+        original_data = audio_bytes.read()
+        # 用独立的 BytesIO 解析，避免原地修改损坏
+        src = io.BytesIO(original_data)
+        audio = MP3(src)
         if audio.tags is None:
             audio.add_tags()
         audio.tags.add(TIT2(encoding=3, text=[song["name"]]))
         audio.tags.add(TPE1(encoding=3, text=[song["artist"]]))
         audio.tags.add(TALB(encoding=3, text=[song["album"]]))
-        audio_bytes.seek(0)
-        audio.save(audio_bytes)
-        audio_bytes.seek(0)
+        # 输出到新的 BytesIO，强制 ID3v2.3（Telegram 兼容性最好）
+        out = io.BytesIO()
+        audio.save(out, v2_version=3)
+        out.seek(0)
+        #  sanity check: 输出不应为空且不应比原始小太多
+        if len(out.getvalue()) < len(original_data) * 0.5:
+            logger.warning(f"ID3标签后文件异常缩小({len(original_data)}→{len(out.getvalue())})，使用原始文件")
+            return io.BytesIO(original_data)
+        return out
     except Exception as e:
         logger.warning(f"写入ID3标签失败: {e}")
         audio_bytes.seek(0)
-    return audio_bytes
+        return audio_bytes
 
 
 async def audio_proxy_handler(request):
@@ -133,28 +142,35 @@ async def audio_proxy_handler(request):
 
     try:
         # 获取播放地址
-        url_result = api.get_song_url([sid], level=quality)
+        url_result = await asyncio.to_thread(api.get_song_url, [sid], level=quality)
         play_url = None
         for item in url_result.get("data", []):
             if item.get("id") == sid:
                 play_url = item.get("url")
                 break
         if not play_url:
+            logger.warning(f"音频代理: 歌曲 {sid} ({name}) 无播放地址")
             return web.Response(status=404, text="Song not available")
 
         # 下载音频
         resp = await asyncio.to_thread(requests.get, play_url, timeout=60)
-        if resp.status_code != 200:
+        if resp.status_code != 200 or len(resp.content) < 1000:
+            logger.warning(f"音频代理: 歌曲 {sid} 下载失败 status={resp.status_code} size={len(resp.content)}")
             return web.Response(status=502, text="Failed to download audio")
+
         audio_bytes = io.BytesIO(resp.content)
+        original_size = len(resp.content)
 
         # 写入ID3标签
         song = {"id": sid, "name": name, "artist": artist, "album": album or name}
         tagged = _tag_mp3(audio_bytes, song)
         tagged.seek(0)
+        tagged_data = tagged.read()
+
+        logger.info(f"音频代理: 歌曲 {sid} ({name}) 原始={original_size}字节 输出={len(tagged_data)}字节")
 
         return web.Response(
-            body=tagged.read(),
+            body=tagged_data,
             content_type="audio/mpeg",
             headers={
                 "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
