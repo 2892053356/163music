@@ -407,9 +407,9 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
         success = 0
         failed = 0
         for idx, song in enumerate(songs, 1):
-            # 用户优先：有用户活动则暂停
-            while time.time() - last_user_activity < 5:
-                await asyncio.sleep(3)
+            # 中等优先级：最近3秒有用户活动则暂停（比缓存排行榜高，比用户单曲低）
+            while time.time() - last_user_activity < 3:
+                await asyncio.sleep(2)
             try:
                 cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
@@ -444,7 +444,7 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
             except Exception as e:
                 logger.warning(f"歌单全部播放失败 {song['name']}: {e}")
                 failed += 1
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1)  # 中等优先级，间隔1秒
 
         await context.bot.send_message(
             chat_id=chat_id,
@@ -1242,8 +1242,8 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = 0
             failed = 0
             for idx, song in enumerate(to_cache, 1):
-                # 用户优先：最近10秒有用户活动则暂停，等待用户空闲
-                while time.time() - last_user_activity < 10:
+                # 最低优先级：最近15秒有用户活动则暂停，等待用户空闲
+                while time.time() - last_user_activity < 15:
                     await asyncio.sleep(5)
 
                 try:
@@ -1284,7 +1284,7 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         config.ADMIN_ID,
                         f"⏳ 缓存预热进度：{idx}/{len(to_cache)}（成功{success}，失败{failed}）"
                     )
-                await asyncio.sleep(2)  # 低优先级，间隔2秒避免影响用户体验
+                await asyncio.sleep(3)  # 最低优先级，间隔3秒避免影响用户体验
 
             await context.bot.send_message(
                 config.ADMIN_ID,
