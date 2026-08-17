@@ -841,18 +841,12 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id_results = await asyncio.gather(*file_id_tasks)
     file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
 
-    # 未缓存的歌曲：并发下载上传到管理员获取file_id（限制最多3首，超时8秒）
+    # 未缓存的歌曲：后台异步缓存（不等待，避免阻塞内联查询导致超时）
     uncached = [s for s in valid_songs if not file_id_map.get(s["id"]) and url_map.get(s["id"])]
     if uncached:
-        uncached = uncached[:3]  # 限制最多3首，避免超时
-        cache_tasks = [_cache_song_to_admin(context, s, url_map[s["id"]]) for s in uncached]
-        try:
-            new_fids = await asyncio.wait_for(asyncio.gather(*cache_tasks), timeout=8)
-            for s, fid in zip(uncached, new_fids):
-                if fid:
-                    file_id_map[s["id"]] = fid
-        except asyncio.TimeoutError:
-            logger.warning("内联缓存超时")
+        uncached = uncached[:3]  # 最多同时缓存3首
+        for s in uncached:
+            asyncio.create_task(_cache_song_to_admin(context, s, url_map[s["id"]]))
 
     # 所有有file_id的歌曲用CachedAudio发出（秒发、零失败）
     results = []
@@ -878,14 +872,18 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     if not results:
+        if uncached:
+            desc = "正在后台缓存，请几秒后再试"
+            msg_text = f"⏳ 「{keyword}」的歌曲正在缓存中，请几秒后再试一次~"
+        else:
+            desc = "换个关键词试试"
+            msg_text = f"😢 「{keyword}」暂无可用结果。"
         results.append(
             InlineQueryResultArticle(
                 id="no_result",
-                title=f"「{keyword}」暂无可用结果",
-                description="换个关键词试试",
-                input_message_content=InputTextMessageContent(
-                    f"😢 「{keyword}」暂无可用结果。"
-                ),
+                title=f"「{keyword}」暂无缓存",
+                description=desc,
+                input_message_content=InputTextMessageContent(msg_text),
             )
         )
 
