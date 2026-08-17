@@ -263,13 +263,13 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
     status_msg = await update.message.reply_text(f"🔍 正在搜索「{keyword}」...")
 
     try:
-        songs = api.search_songs_simple(keyword, limit=config.SEARCH_RESULTS_LIMIT)
+        songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.SEARCH_RESULTS_LIMIT)
     except Exception as e:
         logger.error(f"搜索失败: {e}")
         await status_msg.edit_text("❌ 搜索失败，请稍后重试。")
         return
 
-    db.incr_search()
+    await asyncio.to_thread(db.incr_search)
 
     if not songs:
         await status_msg.edit_text(f"😢 没有找到与「{keyword}」相关的歌曲。")
@@ -555,7 +555,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         ]])
 
     # 检查 file_id 缓存，命中则直接转发（零带宽、秒发）
-    cached_file_id = db.get_file_id(song_id)
+    cached_file_id = await asyncio.to_thread(db.get_file_id, song_id)
     if cached_file_id:
         try:
             if edit:
@@ -650,7 +650,7 @@ async def _send_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE, song_
     await query.answer("正在获取歌词...")
 
     try:
-        result = api.get_lyric(song_id)
+        result = await asyncio.to_thread(api.get_lyric, song_id)
         lrc = result.get("lrc", {}).get("lyric", "")
         if not lrc:
             await query.edit_message_reply_markup(None)
@@ -710,7 +710,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.inline_query
     user = query.from_user
 
-    if _is_banned(user.id):
+    if await asyncio.to_thread(_is_banned, user.id):
         return
 
     keyword = query.query.strip()
@@ -740,7 +740,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not songs:
         logger.error("内联搜索失败（3次重试后）")
 
-    db.incr_search()
+    await asyncio.to_thread(db.incr_search)
 
     if not songs:
         results = [
@@ -798,6 +798,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
+    # 并发获取所有歌曲的file_id缓存（避免同步调用阻塞事件循环）
+    file_id_tasks = [asyncio.to_thread(db.get_file_id, song["id"]) for song in valid_songs]
+    file_id_results = await asyncio.gather(*file_id_tasks)
+    file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
+
     # 优先用file_id缓存（秒发、零带宽），未缓存的用网易云直传URL
     results = []
     for song in valid_songs:
@@ -809,7 +814,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
         # 检查file_id缓存
-        cached_fid = db.get_file_id(song["id"])
+        cached_fid = file_id_map.get(song["id"])
         if cached_fid:
             results.append(
                 InlineQueryResultCachedAudio(
