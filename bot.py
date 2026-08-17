@@ -658,6 +658,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👑 <b>管理员面板</b>\n\n"
         "📊 /stats — 查看机器人统计\n"
+        "👥 /users — 查看用户列表（点击ID访问主页）\n"
         "📢 /broadcast 消息 — 向所有用户广播消息\n"
         "🚫 /ban 用户ID — 封禁用户\n"
         "✅ /unban 用户ID — 解封用户\n"
@@ -696,6 +697,42 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎵 当前音质：{config.MUSIC_QUALITY}"
     )
     await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员查看用户列表，每个用户ID可点击访问主页"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    users = db.get_users()
+    if not users:
+        await update.message.reply_text("📋 暂无注册用户。")
+        return
+
+    # 构建用户列表，每个ID为可点击链接（tg://user?id=xxx 打开用户主页）
+    lines = [f"📋 <b>用户列表</b>（共{len(users)}人）\n"]
+    for uid in sorted(users, key=lambda x: int(x)):
+        # 尝试获取用户名
+        username = ""
+        try:
+            chat = await context.bot.get_chat(int(uid))
+            if chat.username:
+                username = f" @{chat.username}"
+        except Exception:
+            pass
+        # tg://user?id= 链接在Telegram客户端中点击可打开用户主页
+        lines.append(f'• <a href="tg://user?id={uid}">{uid}</a>{username}')
+
+    text = "\n".join(lines)
+    # Telegram单条消息4096字符限制，超长分段
+    if len(text) > 4000:
+        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks:
+            await update.message.reply_text(chunk, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1117,6 +1154,7 @@ def main():
     application.add_handler(CommandHandler("music", cmd_music))
     application.add_handler(CommandHandler("admin", cmd_admin))
     application.add_handler(CommandHandler("stats", cmd_stats))
+    application.add_handler(CommandHandler("users", cmd_users))
     application.add_handler(CommandHandler("broadcast", cmd_broadcast))
     application.add_handler(CommandHandler("ban", cmd_ban))
     application.add_handler(CommandHandler("unban", cmd_unban))
