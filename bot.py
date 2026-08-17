@@ -76,7 +76,7 @@ def _is_banned(user_id: int) -> bool:
 
 
 def _is_admin(user_id: int) -> bool:
-    return user_id == config.ADMIN_ID
+    return db.is_admin(user_id)
 
 
 # ============================================================
@@ -933,8 +933,86 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
         "🔄 <b>服务管理</b>\n"
         "🔁 /restart — 重启Render服务（每4小时自动重启一次）\n"
-        "📊 /cachetop — 预热热歌榜前100首缓存"
+        "📊 /cachetop — 预热热歌榜前100首缓存\n\n"
+        "👑 <b>管理员管理</b>（仅主管理员）\n"
+        "➕ /addadmin 用户ID — 添加管理员\n"
+        "➖ /removeadmin 用户ID — 移除管理员\n"
+        "📋 /admins — 查看管理员列表"
     )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """添加管理员（仅主管理员）"""
+    user = update.effective_user
+    if user.id != config.ADMIN_ID:
+        await update.message.reply_text("⛔ 仅主管理员可使用此命令。")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/addadmin 用户ID")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ 用户ID必须是数字。")
+        return
+    if target_id == config.ADMIN_ID:
+        await update.message.reply_text("⚠️ 该用户已是主管理员。")
+        return
+    if db.is_admin(target_id):
+        await update.message.reply_text("⚠️ 该用户已是管理员。")
+        return
+    db.add_admin(target_id)
+    await update.message.reply_text(f"✅ 已添加管理员：{target_id}")
+    try:
+        await context.bot.send_message(target_id, "🎉 你已被添加为管理员！输入 /admin 查看管理面板。")
+    except Exception:
+        pass
+
+
+async def cmd_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """移除管理员（仅主管理员）"""
+    user = update.effective_user
+    if user.id != config.ADMIN_ID:
+        await update.message.reply_text("⛔ 仅主管理员可使用此命令。")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/removeadmin 用户ID")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ 用户ID必须是数字。")
+        return
+    if target_id == config.ADMIN_ID:
+        await update.message.reply_text("⛔ 不能移除主管理员。")
+        return
+    if not db.is_admin(target_id):
+        await update.message.reply_text("⚠️ 该用户不是管理员。")
+        return
+    db.remove_admin(target_id)
+    await update.message.reply_text(f"✅ 已移除管理员：{target_id}")
+    try:
+        await context.bot.send_message(target_id, "😢 你已被移除管理员权限。")
+    except Exception:
+        pass
+
+
+async def cmd_list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看管理员列表"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    admins = db.get_admins()
+    text = f"👑 <b>管理员列表</b>\n\n"
+    text += f"⭐ 主管理员：<code>{config.ADMIN_ID}</code>\n"
+    if admins:
+        text += f"\n➕ 附加管理员（{len(admins)}人）：\n"
+        for aid in admins:
+            text += f"• <code>{aid}</code>\n"
+    else:
+        text += "\n➕ 暂无附加管理员"
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -1413,6 +1491,9 @@ def main():
     application.add_handler(CommandHandler("music", cmd_music))
     application.add_handler(CommandHandler("playlist", cmd_playlist))
     application.add_handler(CommandHandler("admin", cmd_admin))
+    application.add_handler(CommandHandler("addadmin", cmd_add_admin))
+    application.add_handler(CommandHandler("removeadmin", cmd_remove_admin))
+    application.add_handler(CommandHandler("admins", cmd_list_admins))
     application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(CommandHandler("users", cmd_users))
     application.add_handler(CommandHandler("broadcast", cmd_broadcast))

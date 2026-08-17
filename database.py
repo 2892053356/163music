@@ -105,6 +105,27 @@ class UpstashDB:
     def set_file_id(self, song_id: int, file_id: str):
         self._exec("SET", f"cache:file_id:{song_id}", file_id)
 
+    # ---- 管理员管理（主管理员来自环境变量，附加管理员存Redis） ----
+    def get_admins(self) -> list:
+        """获取所有附加管理员ID列表"""
+        result = self._exec("SMEMBERS", "bot:admins")
+        return [int(x) for x in result] if result else []
+
+    def add_admin(self, user_id: int):
+        """添加管理员"""
+        self._exec("SADD", "bot:admins", str(user_id))
+
+    def remove_admin(self, user_id: int):
+        """移除管理员"""
+        self._exec("SREM", "bot:admins", str(user_id))
+
+    def is_admin(self, user_id: int) -> bool:
+        """检查是否为管理员（含主管理员）"""
+        if user_id == config.ADMIN_ID:
+            return True
+        result = self._exec("SISMEMBER", "bot:admins", str(user_id))
+        return bool(result)
+
 
 # 全局实例
 db = UpstashDB()
