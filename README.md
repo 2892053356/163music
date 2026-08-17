@@ -1,16 +1,30 @@
 # 🎵 网易云音乐 Telegram Bot
 
-支持搜索、播放网易云音乐的 Telegram 机器人，带内联搜索和管理员功能。
+支持搜索、播放网易云音乐的 Telegram 机器人，带内联搜索、歌单播放和管理员功能。
 
-例子：https://t.me/XiOuDi163_bot
+[![Latest Release](https://img.shields.io/github/v/release/2892053356/163music?label=Latest%20Release&style=for-the-badge)](https://github.com/2892053356/163music/releases)
+[![Releases](https://img.shields.io/badge/📦_查看所有版本-Releases-blue?style=for-the-badge)](https://github.com/2892053356/163music/releases)
 
 ## ✨ 功能
 
-- `/music 歌曲名` — 搜索并播放歌曲
+### 搜索与播放
+- `/music 歌曲名` — 搜索并播放歌曲，带歌词按钮
+- `/playlist 歌单ID/链接` — 播放网易云歌单（列表选择 / 全部播放）
 - 内联搜索：`@机器人用户名 歌曲名` — 任意对话中直接分享音频
-- 音频带 ID3 标签（正确显示标题/艺术家）
-- 歌词获取
-- 管理员：广播、统计、封禁、自定义欢迎语
+- 音频带 ID3 标签（正确显示标题/艺术家），MP3 格式
+
+### 缓存与性能
+- Telegram file_id 缓存：播放过的歌曲秒发，零带宽
+- 排行榜预热：`/cachetop` 后台缓存热歌榜前100首
+- 三级任务优先级：用户单曲 > 歌单播放 > 缓存预热
+
+### 管理员功能
+- `/admin` — 管理员面板
+- 广播、统计、封禁用户
+- 自定义欢迎语（`/setwelcome`、`/viewwelcome`、`/resetwelcome`）
+- Cookie 管理（`/cookie`、`/refreshcookie`、`/setcookie`，上传.txt自动识别）
+- 用户列表（`/users`，点击ID访问主页）
+- 手动重启（`/restart`）+ 每4小时自动重启
 
 ## 🚀 Render 部署（Webhook 模式）
 
@@ -44,6 +58,7 @@
 | `NETEASE_COOKIE` | ✅ | 网易云 MUSIC_U cookie 值 |
 | `ADMIN_ID` | ✅ | 管理员用户数字 ID |
 | `MUSIC_QUALITY` | ❌ | 音质，默认 `standard` |
+| `INLINE_RESULTS_LIMIT` | ❌ | 内联搜索结果数，默认 25 |
 | `DEFAULT_WELCOME` | ❌ | 默认欢迎语，支持 `{username}` 变量 |
 | `PROXY_URL` | ❌ | 代理地址，Render 不需要 |
 | `UPSTASH_REDIS_REST_URL` | ✅ | Upstash Redis REST URL |
@@ -66,6 +81,7 @@ Upstash 免费版：每日 10000 次命令，256MB 存储，足够个人使用�
 ## 📖 使用
 
 - `/music 歌曲名` — 搜索播放
+- `/playlist 歌单ID/链接` — 播放歌单
 - `@机器人用户名 歌曲名` — 内联搜索分享
 - `/admin` — 管理员面板
 - `/setwelcome 文本` — 设置欢迎语
@@ -76,5 +92,5 @@ Upstash 免费版：每日 10000 次命令，256MB 存储，足够个人使用�
 - **Webhook 模式**：Render 部署自动使用 webhook，本地未设置 `WEBHOOK_URL` 时自动降级为 long polling
 - Render 免费 Web Service 15分钟无请求会休眠，webhook 消息会自动唤醒实例（首次响应可能有几秒延迟）
 - 数据持久化到 Upstash Redis，重启不丢失
-- 网易云 cookie 会过期，需定期更新环境变量
-- 内联搜索需要下载上传音频，首次响应稍慢
+- 网易云 cookie 会过期，管理员可通过 `/refreshcookie` 或 `/setcookie` 更新
+- 内联搜索首次播放需下载上传，已缓存的歌曲秒发
