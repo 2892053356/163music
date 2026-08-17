@@ -793,6 +793,10 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not songs:
         logger.error("内联搜索失败（3次重试后）")
 
+    # 调试日志：输出搜索关键词和返回结果
+    song_names = [f"{s['name']}({s['artist']})" for s in songs[:5]]
+    logger.info(f"内联搜索 关键词='{keyword}' 返回{len(songs)}首: {', '.join(song_names)}")
+
     await asyncio.to_thread(db.incr_search)
 
     if not songs:
