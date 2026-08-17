@@ -9,6 +9,7 @@ Telegram 网易云音乐机器人
 """
 
 import io
+import os
 import re
 import time
 import asyncio
@@ -650,7 +651,9 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 /cookie — 查看 Cookie 状态\n"
         "🔄 /refreshcookie — 手动刷新 Cookie\n"
         "✏️ /setcookie 值 — 手动设置 Cookie\n"
-        "📎 也可直接上传 .txt 文件或粘贴长文本自动设置"
+        "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
+        "🔄 <b>服务管理</b>\n"
+        "🔁 /restart — 重启Render服务（每24小时自动重启一次）"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -951,6 +954,24 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# 重启功能（管理员手动 + 定时自动）
+# ============================================================
+
+async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员手动重启Render服务（进程退出后Render自动重启）"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    await update.message.reply_text("🔄 正在重启服务，约10秒后恢复...")
+    logger.info("管理员触发重启")
+    # 延迟1秒让消息发送完成，然后强制退出进程，Render会自动重启
+    await asyncio.sleep(1)
+    os._exit(1)
+
+
+# ============================================================
 # 错误处理
 # ============================================================
 
@@ -998,6 +1019,7 @@ def main():
     application.add_handler(CommandHandler("cookie", cmd_cookie))
     application.add_handler(CommandHandler("setcookie", cmd_setcookie))
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
+    application.add_handler(CommandHandler("restart", cmd_restart))
 
     # 管理员上传 .txt 文件设置 cookie
     application.add_handler(MessageHandler(filters.Document.ALL, handle_admin_document))
@@ -1088,6 +1110,26 @@ def main():
                         logger.error(f"定时刷新失败: {e}")
 
             asyncio.create_task(_daily_refresh())
+
+            # 定时自动重启（每24小时），Render检测到进程退出后自动重启
+            async def _auto_restart():
+                while True:
+                    await asyncio.sleep(24 * 3600)
+                    try:
+                        logger.info("定时自动重启触发")
+                        try:
+                            await application.bot.send_message(
+                                chat_id=config.ADMIN_ID,
+                                text="🔄 定时自动重启中，约10秒后恢复..."
+                            )
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1)
+                        os._exit(1)
+                    except Exception as e:
+                        logger.error(f"自动重启失败: {e}")
+
+            asyncio.create_task(_auto_restart())
 
             try:
                 while True:
