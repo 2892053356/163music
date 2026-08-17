@@ -192,22 +192,33 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # 自定义欢迎语优先（从Upstash读取），其次环境变量默认，最后用内置
+    # 自定义欢迎语优先（从Upstash读取），其次环境变量默认
     custom_welcome = db.get_welcome()
     if not custom_welcome:
         custom_welcome = config.DEFAULT_WELCOME
+
+    # 帮助菜单（始终显示）
+    help_menu = (
+        "\n\n📖 <b>使用方法：</b>\n"
+        "1️⃣ /music 歌曲名 — 搜索并播放歌曲\n"
+        "2️⃣ /playlist 歌单ID/链接 — 播放网易云歌单\n"
+        "3️⃣ 内联搜索：在任意聊天输入 <code>@本机器人用户名 歌曲名</code>\n\n"
+        "💡 示例：\n"
+        "• /music 邓紫棋 泡沫\n"
+        "• /playlist 3778678\n"
+        "• @XiOuDi163_bot 句号\n\n"
+        "输入 /help 查看更多帮助"
+    )
+
     if custom_welcome:
         welcome = custom_welcome.replace("{username}", user.first_name or "朋友")
-        await update.message.reply_text(welcome, parse_mode="HTML")
+        await update.message.reply_text(welcome + help_menu, parse_mode="HTML")
         return
 
     text = (
         f"👋 你好，{user.first_name}！\n\n"
-        "我是网易云音乐机器人，可以帮你搜索并播放音乐。\n\n"
-        "📖 <b>使用方法：</b>\n"
-        "1️⃣ /music 歌曲名 — 搜索并播放歌曲\n"
-        "2️⃣ 内联搜索：在任意聊天输入 <code>@本机器人用户名 歌曲名</code>\n\n"
-        "💡 试试：/music 周杰伦 晴天"
+        "我是网易云音乐机器人，可以帮你搜索并播放音乐。"
+        + help_menu
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
