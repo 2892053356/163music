@@ -668,13 +668,27 @@ async def _cache_song_to_admin(context, song, url):
 
         if msg and msg.audio and msg.audio.file_id:
             fid = msg.audio.file_id
-            # 删除管理员临时消息
-            try:
-                await context.bot.delete_message(chat_id=config.ADMIN_ID, message_id=msg.message_id)
-            except Exception:
-                pass
             # 保存缓存
             await asyncio.to_thread(db.set_file_id, song["id"], fid)
+
+            # 后台延迟删除管理员临时消息（延迟2秒确保消息完全处理）
+            async def _del_temp():
+                await asyncio.sleep(2)
+                try:
+                    await context.bot.delete_message(chat_id=config.ADMIN_ID, message_id=msg.message_id)
+                except Exception as del_err:
+                    logger.warning(f"删除管理员临时消息失败: {del_err}")
+                    # 删除失败则编辑消息标记为已缓存
+                    try:
+                        await context.bot.edit_message_caption(
+                            chat_id=config.ADMIN_ID,
+                            message_id=msg.message_id,
+                            caption="✅ 已缓存"
+                        )
+                    except Exception:
+                        pass
+            asyncio.create_task(_del_temp())
+
             return fid
         return None
     except Exception as e:
