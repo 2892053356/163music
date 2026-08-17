@@ -535,7 +535,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT)
+        songs = api.search_songs_simple(keyword, limit=config.INLINE_RESULTS_LIMIT)
     except Exception as e:
         logger.error(f"内联搜索失败: {e}")
         songs = []
@@ -560,7 +560,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     song_ids = [s["id"] for s in songs]
     url_map = {}
     try:
-        url_result = await asyncio.to_thread(api.get_song_url, song_ids, level=config.MUSIC_QUALITY)
+        url_result = api.get_song_url(song_ids, level=config.MUSIC_QUALITY)
         for item in url_result.get("data", []):
             sid = item.get("id")
             u = item.get("url")
