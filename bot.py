@@ -343,7 +343,42 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     db.incr_play()
 
-    # 下载音频到内存，自定义文件名
+    caption = _song_caption(song)
+
+    # 仅在私聊中显示歌词按钮
+    chat = update.effective_chat
+    reply_markup = None
+    if chat and chat.type == "private":
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📝 获取歌词", callback_data=f"lyric:{song_id}")
+        ]])
+
+    # 检查 file_id 缓存，命中则直接转发（零带宽、秒发）
+    cached_file_id = db.get_file_id(song_id)
+    if cached_file_id:
+        try:
+            if edit:
+                await context.bot.send_audio(
+                    chat_id=update.callback_query.message.chat_id,
+                    audio=cached_file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                await update.callback_query.delete_message()
+            else:
+                await context.bot.send_audio(
+                    chat_id=update.message.chat_id,
+                    audio=cached_file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            return
+        except Exception as e:
+            logger.warning(f"file_id缓存发送失败，回退下载: {e}")
+
+    # 缓存未命中，下载音频到内存
     try:
         if edit:
             await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
@@ -360,19 +395,9 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
         return
 
-    caption = _song_caption(song)
-
-    # 仅在私聊中显示歌词按钮
-    chat = update.effective_chat
-    reply_markup = None
-    if chat and chat.type == "private":
-        reply_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📝 获取歌词", callback_data=f"lyric:{song_id}")
-        ]])
-
     try:
         if edit:
-            await context.bot.send_audio(
+            msg = await context.bot.send_audio(
                 chat_id=update.callback_query.message.chat_id,
                 audio=audio_bytes,
                 filename=filename,
@@ -386,7 +411,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             )
             await update.callback_query.delete_message()
         else:
-            await context.bot.send_audio(
+            msg = await context.bot.send_audio(
                 chat_id=update.message.chat_id,
                 audio=audio_bytes,
                 filename=filename,
@@ -398,6 +423,9 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 duration=song["duration"] // 1000 if song["duration"] else None,
                 reply_markup=reply_markup,
             )
+        # 发送成功后保存 file_id 到缓存
+        if msg and msg.audio and msg.audio.file_id:
+            db.set_file_id(song_id, msg.audio.file_id)
     except Exception as e:
         logger.error(f"发送音频失败: {e}")
         if edit:
@@ -557,22 +585,36 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
-    # 直接用网易云URL，Telegram服务器自己下载，不经过Render（避免Render带宽不足超时）
+    # 优先用file_id缓存（秒发、零带宽），未缓存的用网易云直传URL
     results = []
     for song in valid_songs:
-        url = url_map.get(song["id"])
-        if not url:
-            continue
-        # 转HTTPS（Telegram要求HTTPS）
-        if url.startswith("http://"):
-            url = "https://" + url[7:]
-
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
             f"💿 {song['album']}"
             f"{via_line}"
         )
+
+        # 检查file_id缓存
+        cached_fid = db.get_file_id(song["id"])
+        if cached_fid:
+            results.append(
+                InlineQueryResultCachedAudio(
+                    id=str(song["id"]),
+                    audio_file_id=cached_fid,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            )
+            continue
+
+        # 未缓存，用网易云直传URL
+        url = url_map.get(song["id"])
+        if not url:
+            continue
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+
         results.append(
             InlineQueryResultAudio(
                 id=str(song["id"]),

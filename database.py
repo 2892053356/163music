@@ -97,6 +97,14 @@ class UpstashDB:
         result = self._exec("GET", "bot:cookie_updated_at")
         return int(result) if result else 0
 
+    # ---- Telegram file_id 缓存（避免重复上传音频） ----
+    def get_file_id(self, song_id: int) -> str:
+        result = self._exec("GET", f"cache:file_id:{song_id}")
+        return result if result else ""
+
+    def set_file_id(self, song_id: int, file_id: str):
+        self._exec("SET", f"cache:file_id:{song_id}", file_id)
+
 
 # 全局实例
 db = UpstashDB()
