@@ -669,7 +669,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✏️ /setcookie 值 — 手动设置 Cookie\n"
         "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
         "🔄 <b>服务管理</b>\n"
-        "🔁 /restart — 重启Render服务（每4小时自动重启一次）"
+        "🔁 /restart — 重启Render服务（每4小时自动重启一次）\n"
+        "📊 /cachetop — 预热热歌榜前100首缓存"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -970,6 +971,91 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# 排行榜预热缓存（管理员触发，后台执行）
+# ============================================================
+
+async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员触发：获取热歌榜前100，下载并发送给管理员，缓存file_id"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    await update.message.reply_text("📊 正在获取热歌榜前100首...")
+
+    async def _do_cache():
+        try:
+            songs = await asyncio.to_thread(api.get_toplist_songs, 3778678, 100)
+            if not songs:
+                await context.bot.send_message(config.ADMIN_ID, "❌ 获取排行榜失败。")
+                return
+
+            # 过滤已缓存的
+            to_cache = []
+            for s in songs:
+                if not db.get_file_id(s["id"]):
+                    to_cache.append(s)
+            already = len(songs) - len(to_cache)
+            await context.bot.send_message(
+                config.ADMIN_ID,
+                f"📊 排行榜共{len(songs)}首，已缓存{already}首，待缓存{len(to_cache)}首，开始处理..."
+            )
+
+            success = 0
+            failed = 0
+            for idx, song in enumerate(to_cache, 1):
+                try:
+                    # 获取播放地址
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
+                    if not url:
+                        failed += 1
+                        continue
+                    # 下载
+                    resp = await asyncio.to_thread(requests_get, url, 60)
+                    if resp.status_code != 200:
+                        failed += 1
+                        continue
+                    audio_bytes = io.BytesIO(resp.content)
+                    audio_bytes = _tag_mp3(audio_bytes, song)
+                    filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+                    # 发送给管理员
+                    msg = await context.bot.send_audio(
+                        chat_id=config.ADMIN_ID,
+                        audio=audio_bytes,
+                        filename=filename,
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=f"缓存预热 {idx}/{len(to_cache)}",
+                        duration=song["duration"] // 1000 if song["duration"] else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
+                        success += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    logger.warning(f"缓存预热失败 {song['name']}: {e}")
+                    failed += 1
+                # 每10首报告进度
+                if idx % 10 == 0:
+                    await context.bot.send_message(
+                        config.ADMIN_ID,
+                        f"⏳ 缓存预热进度：{idx}/{len(to_cache)}（成功{success}，失败{failed}）"
+                    )
+                await asyncio.sleep(0.5)  # 避免触发Telegram限流
+
+            await context.bot.send_message(
+                config.ADMIN_ID,
+                f"✅ 缓存预热完成！成功{success}首，失败{failed}首，跳过已缓存{already}首。"
+            )
+        except Exception as e:
+            logger.error(f"缓存预热任务失败: {e}")
+            await context.bot.send_message(config.ADMIN_ID, f"❌ 缓存预热失败: {e}")
+
+    asyncio.create_task(_do_cache())
+
+
+# ============================================================
 # 重启功能（管理员手动 + 定时自动）
 # ============================================================
 
@@ -1035,6 +1121,7 @@ def main():
     application.add_handler(CommandHandler("setcookie", cmd_setcookie))
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
     application.add_handler(CommandHandler("restart", cmd_restart))
+    application.add_handler(CommandHandler("cachetop", cmd_cachetop))
 
     # 管理员上传 .txt 文件设置 cookie
     application.add_handler(MessageHandler(filters.Document.ALL, handle_admin_document))
