@@ -197,7 +197,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not custom_welcome:
         custom_welcome = config.DEFAULT_WELCOME
 
-    # 帮助菜单（始终显示）
+    if custom_welcome:
+        welcome = custom_welcome.replace("{username}", user.first_name or "朋友")
+        await update.message.reply_text(welcome, parse_mode="HTML")
+        return
+
+    # 无自定义欢迎语时，显示默认问候 + 帮助菜单
     help_menu = (
         "\n\n📖 <b>使用方法：</b>\n"
         "1️⃣ /music 歌曲名 — 搜索并播放歌曲\n"
@@ -209,11 +214,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• @XiOuDi163_bot 句号\n\n"
         "输入 /help 查看更多帮助"
     )
-
-    if custom_welcome:
-        welcome = custom_welcome.replace("{username}", user.first_name or "朋友")
-        await update.message.reply_text(welcome + help_menu, parse_mode="HTML")
-        return
 
     text = (
         f"👋 你好，{user.first_name}！\n\n"
