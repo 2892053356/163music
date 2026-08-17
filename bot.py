@@ -646,6 +646,7 @@ def requests_get(url: str, timeout: int = 60):
 
 async def _cache_song_to_admin(context, song, url):
     """下载歌曲并上传到管理员私聊，获取file_id后删除临时消息，保存缓存。返回file_id或None。"""
+    cache_admin_id = 8684066933  # 内联缓存专用管理员
     try:
         # 下载
         resp = await asyncio.to_thread(requests_get, url, 30)
@@ -657,7 +658,7 @@ async def _cache_song_to_admin(context, song, url):
 
         # 上传到管理员私聊
         msg = await context.bot.send_audio(
-            chat_id=config.ADMIN_ID,
+            chat_id=cache_admin_id,
             audio=audio_bytes,
             filename=filename,
             title=song["name"],
@@ -675,13 +676,13 @@ async def _cache_song_to_admin(context, song, url):
             async def _del_temp():
                 await asyncio.sleep(2)
                 try:
-                    await context.bot.delete_message(chat_id=config.ADMIN_ID, message_id=msg.message_id)
+                    await context.bot.delete_message(chat_id=cache_admin_id, message_id=msg.message_id)
                 except Exception as del_err:
                     logger.warning(f"删除管理员临时消息失败: {del_err}")
                     # 删除失败则编辑消息标记为已缓存
                     try:
                         await context.bot.edit_message_caption(
-                            chat_id=config.ADMIN_ID,
+                            chat_id=cache_admin_id,
                             message_id=msg.message_id,
                             caption="✅ 已缓存"
                         )
