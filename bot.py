@@ -9,7 +9,6 @@ Telegram 网易云音乐机器人
 """
 
 import io
-import os
 import re
 import time
 import asyncio
@@ -19,7 +18,6 @@ import requests
 from datetime import datetime
 from urllib.parse import quote
 
-import aiohttp
 from aiohttp import web
 
 from telegram import (
@@ -120,11 +118,13 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
 
 async def audio_proxy_handler(request):
     """
-    音频代理端点：流式转发网易云MP3，带Referer请求头避免0B问题。
-    内联搜索通过此URL让 Telegram 拉取音频。
+    音频代理端点：根据 song_id 从网易云下载MP3，写入ID3标签后返回。
+    内联搜索通过此URL让 Telegram 直接拉取音频，无需先上传到管理员私聊。
     """
     song_id = request.match_info.get("song_id")
     name = request.query.get("name", "未知歌曲")
+    artist = request.query.get("artist", "未知艺术家")
+    album = request.query.get("album", "")
     quality = request.query.get("quality", config.MUSIC_QUALITY)
 
     try:
@@ -133,8 +133,8 @@ async def audio_proxy_handler(request):
         return web.Response(status=400, text="Invalid song_id")
 
     try:
-        # 获取播放地址（同步调用，用to_thread避免阻塞）
-        url_result = await asyncio.to_thread(api.get_song_url, [sid], level=quality)
+        # 获取播放地址
+        url_result = api.get_song_url([sid], level=quality)
         play_url = None
         for item in url_result.get("data", []):
             if item.get("id") == sid:
@@ -143,65 +143,25 @@ async def audio_proxy_handler(request):
         if not play_url:
             return web.Response(status=404, text="Song not available")
 
-        # 生成CDN备选节点（原始节点 + 常用备选节点）
-        import re as _re
-        cdn_nodes = ["m701", "m702", "m801", "m802", "m803", "m805", "m806", "m807", "m808", "m809", "m810", "m811", "m812", "m813"]
-        candidate_urls = [play_url]
-        for node in cdn_nodes:
-            alt_url = _re.sub(r'https?://m\d+\.music\.126\.net', f'http://{node}.music.126.net', play_url)
-            if alt_url != play_url and alt_url not in candidate_urls:
-                candidate_urls.append(alt_url)
+        # 下载音频
+        resp = await asyncio.to_thread(requests.get, play_url, timeout=60)
+        if resp.status_code != 200:
+            return web.Response(status=502, text="Failed to download audio")
+        audio_bytes = io.BytesIO(resp.content)
 
-        # 带Referer头的请求配置
-        proxy_headers = {
-            "Referer": "https://music.163.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        }
-        proxy_timeout = aiohttp.ClientTimeout(total=60, connect=20)
+        # 写入ID3标签
+        song = {"id": sid, "name": name, "artist": artist, "album": album or name}
+        tagged = _tag_mp3(audio_bytes, song)
+        tagged.seek(0)
 
-        # 逐个尝试CDN节点，直到成功
-        resp = None
-        used_url = None
-        async with aiohttp.ClientSession(timeout=proxy_timeout, headers=proxy_headers) as session:
-            for idx, try_url in enumerate(candidate_urls):
-                try:
-                    resp = await session.get(try_url)
-                    if resp.status == 200:
-                        used_url = try_url
-                        break
-                    else:
-                        logger.warning(f"CDN节点返回{resp.status}，尝试下一个 (song_id={song_id})")
-                        await resp.release()
-                        resp = None
-                except Exception as e:
-                    logger.warning(f"CDN节点连接失败 ({try_url[:50]}...): {e}")
-                    resp = None
-                    continue
-
-            if not resp:
-                return web.Response(status=502, text="All CDN nodes failed")
-
-            if idx > 0:
-                logger.info(f"CDN轮换成功: 使用备选节点 (song_id={song_id}, 尝试{idx+1}次)")
-
-            # 构建流式响应
-            response = web.StreamResponse(
-                status=200,
-                headers={
-                    "Content-Type": "audio/mpeg",
-                    "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
-                    "Cache-Control": "public, max-age=3600",
-                    "Accept-Ranges": "none",
-                },
-            )
-            await response.prepare(request)
-
-            # 逐块转发
-            async for chunk in resp.content.iter_chunked(65536):
-                await response.write(chunk)
-
-            await response.write_eof()
-            return response
+        return web.Response(
+            body=tagged.read(),
+            content_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
+                "Cache-Control": "public, max-age=3600",
+            },
+        )
     except Exception as e:
         logger.error(f"音频代理失败 song_id={song_id}: {e}")
         return web.Response(status=500, text=f"Proxy error: {e}")
@@ -339,53 +299,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id: int, edit: bool = False):
     """获取歌曲信息，下载音频并发送（带歌词按钮）"""
-    # 获取歌曲详情（同步调用用to_thread+重试，避免阻塞事件循环和网络抖动）
-    detail = None
-    for attempt in range(3):
-        try:
-            detail = await asyncio.to_thread(api.get_song_detail, [song_id])
-            break
-        except Exception as e:
-            logger.warning(f"获取歌曲详情 第{attempt+1}次失败: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1)
-    if not detail:
-        logger.error("获取歌曲详情失败（3次重试后）")
+    # 获取歌曲详情
+    try:
+        detail = api.get_song_detail([song_id])
+        songs_detail = detail.get("songs", [])
+        if not songs_detail:
+            if edit:
+                await update.callback_query.edit_message_text("❌ 未找到该歌曲信息。")
+            else:
+                await update.message.reply_text("❌ 未找到该歌曲信息。")
+            return
+
+        sd = songs_detail[0]
+        song = {
+            "id": sd["id"],
+            "name": sd["name"],
+            "artist": "/".join(a["name"] for a in sd.get("ar", [])),
+            "album": sd.get("al", {}).get("name", ""),
+            "cover": sd.get("al", {}).get("picUrl", ""),
+            "duration": sd.get("dt", 0),
+        }
+    except Exception as e:
+        logger.error(f"获取歌曲详情失败: {e}")
         if edit:
-            await update.callback_query.edit_message_text("❌ 获取歌曲信息失败，请稍后重试。")
-        else:
-            await update.message.reply_text("❌ 获取歌曲信息失败，请稍后重试。")
+            await update.callback_query.edit_message_text("❌ 获取歌曲信息失败。")
         return
 
-    songs_detail = detail.get("songs", [])
-    if not songs_detail:
-        if edit:
-            await update.callback_query.edit_message_text("❌ 未找到该歌曲信息。")
-        else:
-            await update.message.reply_text("❌ 未找到该歌曲信息。")
-        return
-
-    sd = songs_detail[0]
-    song = {
-        "id": sd["id"],
-        "name": sd["name"],
-        "artist": "/".join(a["name"] for a in sd.get("ar", [])),
-        "album": sd.get("al", {}).get("name", ""),
-        "cover": sd.get("al", {}).get("picUrl", ""),
-        "duration": sd.get("dt", 0),
-    }
-
-    # 获取播放地址（to_thread+重试）
-    url = ""
-    for attempt in range(3):
-        try:
-            url = await asyncio.to_thread(api.get_first_song_url, song_id, level=config.MUSIC_QUALITY)
-            if url:
-                break
-        except Exception as e:
-            logger.warning(f"获取播放地址 第{attempt+1}次失败: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1)
+    # 获取播放地址
+    try:
+        url = api.get_first_song_url(song_id, level=config.MUSIC_QUALITY)
+    except Exception as e:
+        logger.error(f"获取播放地址失败: {e}")
+        url = ""
 
     if not url:
         msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
@@ -397,33 +342,22 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     db.incr_play()
 
-    # 下载音频到内存（to_thread+重试），自定义文件名
-    resp = None
-    for attempt in range(3):
-        try:
-            if edit and attempt == 0:
-                await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-            resp = await asyncio.to_thread(requests_get, url, 60)
-            if resp and resp.status_code == 200:
-                break
-            resp = None
-        except Exception as e:
-            logger.warning(f"下载音频 第{attempt+1}次失败: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1)
-
-    if not resp:
-        logger.error("下载音频失败（3次重试后）")
+    # 下载音频到内存，自定义文件名
+    try:
+        if edit:
+            await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
+        resp = requests_get(url, timeout=60)
+        audio_bytes = io.BytesIO(resp.content)
+        # 写入ID3标签，确保Telegram显示正确的标题和艺术家
+        audio_bytes = _tag_mp3(audio_bytes, song)
+        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+    except Exception as e:
+        logger.error(f"下载音频失败: {e}")
         if edit:
             await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
         else:
             await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
         return
-
-    audio_bytes = io.BytesIO(resp.content)
-    # 写入ID3标签，确保Telegram显示正确的标题和艺术家
-    audio_bytes = _tag_mp3(audio_bytes, song)
-    filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
 
     caption = _song_caption(song)
 
@@ -565,7 +499,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT)
+        songs = api.search_songs_simple(keyword, limit=config.INLINE_RESULTS_LIMIT)
     except Exception as e:
         logger.error(f"内联搜索失败: {e}")
         songs = []
@@ -590,7 +524,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     song_ids = [s["id"] for s in songs]
     url_map = {}
     try:
-        url_result = await asyncio.to_thread(api.get_song_url, song_ids, level=config.MUSIC_QUALITY)
+        url_result = api.get_song_url(song_ids, level=config.MUSIC_QUALITY)
         for item in url_result.get("data", []):
             sid = item.get("id")
             u = item.get("url")
@@ -622,18 +556,16 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
-    # 使用音频代理URL（Render流式转发，带Referer头避免0B问题）
-    base_url = config.WEBHOOK_URL.rstrip("/") if config.WEBHOOK_URL else ""
+    # 直接用网易云URL，Telegram服务器自己下载，不经过Render（避免Render带宽不足超时）
     results = []
     for song in valid_songs:
-        if not base_url:
+        url = url_map.get(song["id"])
+        if not url:
             continue
-        # 构建音频代理URL
-        audio_url = (
-            f"{base_url}/audio/{song['id']}"
-            f"?name={quote(song['name'])}"
-            f"&quality={config.MUSIC_QUALITY}"
-        )
+        # 转HTTPS（Telegram要求HTTPS）
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
@@ -643,7 +575,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         results.append(
             InlineQueryResultAudio(
                 id=str(song["id"]),
-                audio_url=audio_url,
+                audio_url=url,
                 title=song["name"],
                 performer=song["artist"],
                 audio_duration=song["duration"] // 1000 if song.get("duration") else None,
@@ -692,9 +624,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 /cookie — 查看 Cookie 状态\n"
         "🔄 /refreshcookie — 手动刷新 Cookie\n"
         "✏️ /setcookie 值 — 手动设置 Cookie\n"
-        "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
-        "🔄 <b>服务管理</b>\n"
-        "🔁 /restart — 重启Render服务（每4小时自动重启一次）"
+        "📎 也可直接上传 .txt 文件或粘贴长文本自动设置"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -995,24 +925,6 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# 重启功能（管理员手动 + 定时自动）
-# ============================================================
-
-async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员手动重启Render服务（进程退出后Render自动重启）"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        await update.message.reply_text("⛔ 权限不足。")
-        return
-
-    await update.message.reply_text("🔄 正在重启服务，约10秒后恢复...")
-    logger.info("管理员触发重启")
-    # 延迟1秒让消息发送完成，然后强制退出进程，Render会自动重启
-    await asyncio.sleep(1)
-    os._exit(1)
-
-
-# ============================================================
 # 错误处理
 # ============================================================
 
@@ -1060,7 +972,6 @@ def main():
     application.add_handler(CommandHandler("cookie", cmd_cookie))
     application.add_handler(CommandHandler("setcookie", cmd_setcookie))
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
-    application.add_handler(CommandHandler("restart", cmd_restart))
 
     # 管理员上传 .txt 文件设置 cookie
     application.add_handler(MessageHandler(filters.Document.ALL, handle_admin_document))
@@ -1151,26 +1062,6 @@ def main():
                         logger.error(f"定时刷新失败: {e}")
 
             asyncio.create_task(_daily_refresh())
-
-            # 定时自动重启（每4小时），Render检测到进程退出后自动重启
-            async def _auto_restart():
-                while True:
-                    await asyncio.sleep(4 * 3600)
-                    try:
-                        logger.info("定时自动重启触发")
-                        try:
-                            await application.bot.send_message(
-                                chat_id=config.ADMIN_ID,
-                                text="🔄 定时自动重启中，约10秒后恢复..."
-                            )
-                        except Exception:
-                            pass
-                        await asyncio.sleep(1)
-                        os._exit(1)
-                    except Exception as e:
-                        logger.error(f"自动重启失败: {e}")
-
-            asyncio.create_task(_auto_restart())
 
             try:
                 while True:
