@@ -826,22 +826,29 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             continue
 
-        # 未缓存，用网易云直传URL
+        # 未缓存：用 deep link 跳转到私聊播放（避免网易云CDN对Telegram海外IP限制导致curl failed）
         url = url_map.get(song["id"])
         if not url:
             continue
-        if url.startswith("http://"):
-            url = "https://" + url[7:]
+
+        bot_uname = context.bot.username or ""
+        deep_link = f"https://t.me/{bot_uname}?start=play_{song['id']}" if bot_uname else ""
 
         results.append(
-            InlineQueryResultAudio(
+            InlineQueryResultArticle(
                 id=str(song["id"]),
-                audio_url=url,
-                title=song["name"],
-                performer=song["artist"],
-                audio_duration=song["duration"] // 1000 if song.get("duration") else None,
-                caption=caption,
-                parse_mode="HTML",
+                title=f"🎵 {song['name']}",
+                description=f"{song['artist']} · 点击在私聊中播放",
+                thumb_url=None,
+                input_message_content=InputTextMessageContent(
+                    f"🎵 <b>{song['name']}</b>\n"
+                    f"👤 {song['artist']}\n"
+                    f"💿 {song['album']}\n\n"
+                    f"⏳ 点击下方按钮在私聊中播放~"
+                ),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("▶️ 在私聊中播放", url=deep_link)
+                ]]) if deep_link else None
             )
         )
 
