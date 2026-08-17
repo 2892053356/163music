@@ -217,6 +217,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 <b>帮助文档</b>\n\n"
         "🎵 <b>搜索与播放</b>\n"
         "• /music 关键词 — 搜索歌曲\n"
+        "• /playlist 歌单ID/链接 — 播放网易云歌单\n"
         "• 内联模式：@机器人用户名 关键词 — 在任意对话中搜索分享\n\n"
         "🔧 <b>其他</b>\n"
         "• /start — 开始\n"
@@ -280,6 +281,169 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
 
 
 # ============================================================
+# 歌单功能
+# ============================================================
+
+PLAYLIST_PAGE_SIZE = 10
+PLAYLIST_MAX_SONGS = 50
+
+
+def _extract_playlist_id(text: str) -> int:
+    """从歌单链接或纯数字中提取歌单ID"""
+    text = text.strip()
+    # 尝试从链接中提取 id=xxx
+    m = re.search(r"[?&]id=(\d+)", text)
+    if m:
+        return int(m.group(1))
+    # 纯数字
+    if text.isdigit():
+        return int(text)
+    return 0
+
+
+async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/playlist 歌单ID或链接 — 显示歌单，选择列表播放或全部播放"""
+    user = update.effective_user
+    if _is_banned(user.id):
+        await update.message.reply_text("⛔ 你已被管理员封禁。")
+        return
+
+    arg = " ".join(context.args).strip()
+    if not arg:
+        await update.message.reply_text("⚠️ 用法：/playlist 歌单ID 或 歌单链接")
+        return
+
+    playlist_id = _extract_playlist_id(arg)
+    if not playlist_id:
+        await update.message.reply_text("❌ 无法识别歌单ID，请输入数字ID或完整链接。")
+        return
+
+    _register_user(user.id)
+    status = await update.message.reply_text(f"🔍 正在获取歌单 {playlist_id} ...")
+
+    try:
+        songs = await asyncio.to_thread(api.get_toplist_songs, playlist_id, PLAYLIST_MAX_SONGS)
+    except Exception as e:
+        logger.error(f"获取歌单失败: {e}")
+        await status.edit_text("❌ 获取歌单失败，请检查歌单ID是否正确。")
+        return
+
+    if not songs:
+        await status.edit_text("😢 该歌单为空或无法访问。")
+        return
+
+    # 存储歌单歌曲到context，供回调使用
+    context.user_data[f"playlist_{playlist_id}"] = songs
+
+    # 显示选择模式
+    keyboard = [
+        [InlineKeyboardButton("📋 列表播放（选歌）", callback_data=f"plist:{playlist_id}:0")],
+        [InlineKeyboardButton("▶️ 全部播放（自动发送）", callback_data=f"pall:{playlist_id}")],
+    ]
+    await status.edit_text(
+        f"📀 <b>歌单</b>（共{len(songs)}首，显示前{min(len(songs), PLAYLIST_MAX_SONGS)}首）\n\n请选择播放方式：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+
+
+async def _show_playlist_page(update: Update, context, playlist_id: int, page: int):
+    """分页显示歌单歌曲列表"""
+    songs = context.user_data.get(f"playlist_{playlist_id}", [])
+    if not songs:
+        await update.callback_query.edit_message_text("❌ 歌单数据已过期，请重新输入 /playlist")
+        return
+
+    total = len(songs)
+    total_pages = (total + PLAYLIST_PAGE_SIZE - 1) // PLAYLIST_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start = page * PLAYLIST_PAGE_SIZE
+    end = min(start + PLAYLIST_PAGE_SIZE, total)
+    page_songs = songs[start:end]
+
+    keyboard = []
+    for i, song in enumerate(page_songs, start + 1):
+        label = f"{i}. {song['name']} - {song['artist']}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"play:{song['id']}")])
+
+    # 翻页按钮
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"plist:{playlist_id}:{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"plist:{playlist_id}:{page+1}"))
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("🔙 返回选择", callback_data=f"pmenu:{playlist_id}")])
+
+    await update.callback_query.edit_message_text(
+        f"📀 歌单歌曲（第{page+1}/{total_pages}页，共{total}首）：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _play_playlist_all(update: Update, context, playlist_id: int):
+    """全部播放：后台逐个发送歌单歌曲"""
+    songs = context.user_data.get(f"playlist_{playlist_id}", [])
+    if not songs:
+        await update.callback_query.edit_message_text("❌ 歌单数据已过期，请重新输入 /playlist")
+        return
+
+    chat_id = update.callback_query.message.chat_id
+    await update.callback_query.edit_message_text(f"▶️ 开始全部播放 {len(songs)} 首歌曲...")
+
+    async def _send_all():
+        success = 0
+        failed = 0
+        for idx, song in enumerate(songs, 1):
+            # 用户优先：有用户活动则暂停
+            while time.time() - last_user_activity < 5:
+                await asyncio.sleep(3)
+            try:
+                cached = db.get_file_id(song["id"])
+                caption = _song_caption(song)
+                if cached:
+                    await context.bot.send_audio(
+                        chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
+                    )
+                else:
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
+                    if not url:
+                        failed += 1
+                        continue
+                    resp = await asyncio.to_thread(requests_get, url, 60)
+                    if resp.status_code != 200:
+                        failed += 1
+                        continue
+                    audio_bytes = io.BytesIO(resp.content)
+                    audio_bytes = _tag_mp3(audio_bytes, song)
+                    msg = await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_bytes,
+                        filename=f"{song['name']}.mp3",
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=caption,
+                        parse_mode="HTML",
+                        duration=song["duration"] // 1000 if song["duration"] else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
+                success += 1
+            except Exception as e:
+                logger.warning(f"歌单全部播放失败 {song['name']}: {e}")
+                failed += 1
+            await asyncio.sleep(1.5)
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ 歌单播放完成！成功{success}首，失败{failed}首。"
+        )
+
+    asyncio.create_task(_send_all())
+
+
+# ============================================================
 # 回调查询（按钮点击）
 # ============================================================
 
@@ -299,6 +463,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("lyric:"):
         song_id = int(data.split(":", 1)[1])
         await _send_lyrics(update, context, song_id)
+    elif data.startswith("plist:"):
+        # 歌单列表分页
+        parts = data.split(":")
+        pid = int(parts[1])
+        page = int(parts[2]) if len(parts) > 2 else 0
+        await _show_playlist_page(update, context, pid, page)
+    elif data.startswith("pall:"):
+        # 歌单全部播放
+        pid = int(data.split(":", 1)[1])
+        await _play_playlist_all(update, context, pid)
+    elif data.startswith("pmenu:"):
+        # 返回歌单选择菜单
+        pid = int(data.split(":", 1)[1])
+        songs = context.user_data.get(f"playlist_{pid}", [])
+        keyboard = [
+            [InlineKeyboardButton("📋 列表播放（选歌）", callback_data=f"plist:{pid}:0")],
+            [InlineKeyboardButton("▶️ 全部播放（自动发送）", callback_data=f"pall:{pid}")],
+        ]
+        await query.edit_message_text(
+            f"📀 <b>歌单</b>（共{len(songs)}首）\n\n请选择播放方式：",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML",
+        )
 
 
 async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id: int, edit: bool = False):
@@ -1152,6 +1339,7 @@ def main():
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("music", cmd_music))
+    application.add_handler(CommandHandler("playlist", cmd_playlist))
     application.add_handler(CommandHandler("admin", cmd_admin))
     application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(CommandHandler("users", cmd_users))
