@@ -526,7 +526,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT)
+        songs = api.search_songs_simple(keyword, limit=config.INLINE_RESULTS_LIMIT)
     except Exception as e:
         logger.error(f"内联搜索失败: {e}")
         songs = []
@@ -551,7 +551,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     song_ids = [s["id"] for s in songs]
     url_map = {}
     try:
-        url_result = await asyncio.to_thread(api.get_song_url, song_ids, level=config.MUSIC_QUALITY)
+        url_result = api.get_song_url(song_ids, level=config.MUSIC_QUALITY)
         for item in url_result.get("data", []):
             sid = item.get("id")
             u = item.get("url")
@@ -653,7 +653,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✏️ /setcookie 值 — 手动设置 Cookie\n"
         "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
         "🔄 <b>服务管理</b>\n"
-        "🔁 /restart — 重启Render服务（每24小时自动重启一次）"
+        "🔁 /restart — 重启Render服务（每4小时自动重启一次）"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -1111,10 +1111,10 @@ def main():
 
             asyncio.create_task(_daily_refresh())
 
-            # 定时自动重启（每24小时），Render检测到进程退出后自动重启
+            # 定时自动重启（每4小时），Render检测到进程退出后自动重启
             async def _auto_restart():
                 while True:
-                    await asyncio.sleep(24 * 3600)
+                    await asyncio.sleep(4 * 3600)
                     try:
                         logger.info("定时自动重启触发")
                         try:
