@@ -143,35 +143,65 @@ async def audio_proxy_handler(request):
         if not play_url:
             return web.Response(status=404, text="Song not available")
 
-        # 流式转发：用aiohttp请求网易云，带Referer头，边下载边返回
-        headers = {
+        # 生成CDN备选节点（原始节点 + 常用备选节点）
+        import re as _re
+        cdn_nodes = ["m701", "m702", "m801", "m802", "m803", "m805", "m806", "m807", "m808", "m809", "m810", "m811", "m812", "m813"]
+        candidate_urls = [play_url]
+        for node in cdn_nodes:
+            alt_url = _re.sub(r'https?://m\d+\.music\.126\.net', f'http://{node}.music.126.net', play_url)
+            if alt_url != play_url and alt_url not in candidate_urls:
+                candidate_urls.append(alt_url)
+
+        # 带Referer头的请求配置
+        proxy_headers = {
             "Referer": "https://music.163.com/",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         }
-        timeout = aiohttp.ClientTimeout(total=60, connect=15)
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(play_url) as resp:
-                if resp.status != 200:
-                    return web.Response(status=502, text=f"Upstream error: {resp.status}")
+        proxy_timeout = aiohttp.ClientTimeout(total=60, connect=20)
 
-                # 构建流式响应
-                response = web.StreamResponse(
-                    status=200,
-                    headers={
-                        "Content-Type": "audio/mpeg",
-                        "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
-                        "Cache-Control": "public, max-age=3600",
-                        "Accept-Ranges": "none",
-                    },
-                )
-                await response.prepare(request)
+        # 逐个尝试CDN节点，直到成功
+        resp = None
+        used_url = None
+        async with aiohttp.ClientSession(timeout=proxy_timeout, headers=proxy_headers) as session:
+            for idx, try_url in enumerate(candidate_urls):
+                try:
+                    resp = await session.get(try_url)
+                    if resp.status == 200:
+                        used_url = try_url
+                        break
+                    else:
+                        logger.warning(f"CDN节点返回{resp.status}，尝试下一个 (song_id={song_id})")
+                        await resp.release()
+                        resp = None
+                except Exception as e:
+                    logger.warning(f"CDN节点连接失败 ({try_url[:50]}...): {e}")
+                    resp = None
+                    continue
 
-                # 逐块转发
-                async for chunk in resp.content.iter_chunked(65536):
-                    await response.write(chunk)
+            if not resp:
+                return web.Response(status=502, text="All CDN nodes failed")
 
-                await response.write_eof()
-                return response
+            if idx > 0:
+                logger.info(f"CDN轮换成功: 使用备选节点 (song_id={song_id}, 尝试{idx+1}次)")
+
+            # 构建流式响应
+            response = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "audio/mpeg",
+                    "Content-Disposition": f'inline; filename="{quote(name)}.mp3"',
+                    "Cache-Control": "public, max-age=3600",
+                    "Accept-Ranges": "none",
+                },
+            )
+            await response.prepare(request)
+
+            # 逐块转发
+            async for chunk in resp.content.iter_chunked(65536):
+                await response.write(chunk)
+
+            await response.write_eof()
+            return response
     except Exception as e:
         logger.error(f"音频代理失败 song_id={song_id}: {e}")
         return web.Response(status=500, text=f"Proxy error: {e}")
@@ -535,7 +565,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        songs = api.search_songs_simple(keyword, limit=config.INLINE_RESULTS_LIMIT)
+        songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT)
     except Exception as e:
         logger.error(f"内联搜索失败: {e}")
         songs = []
@@ -560,7 +590,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     song_ids = [s["id"] for s in songs]
     url_map = {}
     try:
-        url_result = api.get_song_url(song_ids, level=config.MUSIC_QUALITY)
+        url_result = await asyncio.to_thread(api.get_song_url, song_ids, level=config.MUSIC_QUALITY)
         for item in url_result.get("data", []):
             sid = item.get("id")
             u = item.get("url")
