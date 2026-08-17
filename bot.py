@@ -59,6 +59,9 @@ logger = logging.getLogger(__name__)
 # ============================================================
 api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
 
+# 用户活动时间戳（用于缓存任务优先级控制：有用户请求时暂停缓存）
+last_user_activity = 0
+
 # ============================================================
 # 数据存储（Upstash Redis 持久化）
 # ============================================================
@@ -1004,6 +1007,10 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = 0
             failed = 0
             for idx, song in enumerate(to_cache, 1):
+                # 用户优先：最近10秒有用户活动则暂停，等待用户空闲
+                while time.time() - last_user_activity < 10:
+                    await asyncio.sleep(5)
+
                 try:
                     # 获取播放地址
                     url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
@@ -1042,7 +1049,7 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         config.ADMIN_ID,
                         f"⏳ 缓存预热进度：{idx}/{len(to_cache)}（成功{success}，失败{failed}）"
                     )
-                await asyncio.sleep(0.5)  # 避免触发Telegram限流
+                await asyncio.sleep(2)  # 低优先级，间隔2秒避免影响用户体验
 
             await context.bot.send_message(
                 config.ADMIN_ID,
@@ -1168,6 +1175,8 @@ def main():
             app = web.Application()
 
             async def webhook_handler(request):
+                global last_user_activity
+                last_user_activity = time.time()
                 if request.can_read_body:
                     try:
                         data = await request.json()
