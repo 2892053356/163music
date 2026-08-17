@@ -728,11 +728,17 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=1)
         return
 
-    try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT)
-    except Exception as e:
-        logger.error(f"内联搜索失败: {e}")
-        songs = []
+    songs = []
+    for attempt in range(3):
+        try:
+            songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT)
+            break
+        except Exception as e:
+            logger.warning(f"内联搜索 第{attempt+1}次失败: {e}")
+            if attempt < 2:
+                await asyncio.sleep(1)
+    if not songs:
+        logger.error("内联搜索失败（3次重试后）")
 
     db.incr_search()
 
@@ -753,15 +759,21 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 批量获取所有歌曲的播放地址
     song_ids = [s["id"] for s in songs]
     url_map = {}
-    try:
-        url_result = await asyncio.to_thread(api.get_song_url, song_ids, level=config.MUSIC_QUALITY)
+    url_result = None
+    for attempt in range(3):
+        try:
+            url_result = await asyncio.to_thread(api.get_song_url, song_ids, level=config.MUSIC_QUALITY)
+            break
+        except Exception as e:
+            logger.warning(f"批量获取播放地址 第{attempt+1}次失败: {e}")
+            if attempt < 2:
+                await asyncio.sleep(1)
+    if url_result:
         for item in url_result.get("data", []):
             sid = item.get("id")
             u = item.get("url")
             if sid and u:
                 url_map[sid] = u
-    except Exception as e:
-        logger.error(f"批量获取播放地址失败: {e}")
 
     # 过滤有播放地址的歌曲
     results = []
