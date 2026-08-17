@@ -36,4 +36,16 @@ UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
 # 默认欢迎语（可通过管理员 /setwelcome 运行时修改，持久化到 Upstash）
-DEFAULT_WELCOME = os.environ.get("DEFAULT_WELCOME", "")
+DEFAULT_WELCOME = os.environ.get("DEFAULT_WELCOME", """👋 你好，{username}
+
+此bot由西欧帝制作 @XiOuDi_A 
+有任何建议可以给我留言
+
+📖 使用方法：
+1.   /music 关键词 — 搜索歌曲
+2.  内联搜索：在任意聊天输入 @XiOuDi163music 歌曲名
+3.  /playlist 歌单ID/链接 — 播放网易云歌单
+
+例如 
+/music 邓紫棋 泡沫
+@XiOuDi163_bot 邓紫棋 泡沫""")
