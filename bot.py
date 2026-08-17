@@ -626,7 +626,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             )
         # 发送成功后保存 file_id 到缓存
         if msg and msg.audio and msg.audio.file_id:
-            db.set_file_id(song_id, msg.audio.file_id)
+            await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
     except Exception as e:
         logger.error(f"发送音频失败: {e}")
         if edit:
@@ -642,6 +642,44 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 def requests_get(url: str, timeout: int = 60):
     """同步 GET 请求（用于在异步函数中下载文件）"""
     return requests.get(url, timeout=timeout)
+
+
+async def _cache_song_to_admin(context, song, url):
+    """下载歌曲并上传到管理员私聊，获取file_id后删除临时消息，保存缓存。返回file_id或None。"""
+    try:
+        # 下载
+        resp = await asyncio.to_thread(requests_get, url, 30)
+        if resp.status_code != 200 or not resp.content:
+            return None
+        audio_bytes = io.BytesIO(resp.content)
+        audio_bytes = _tag_mp3(audio_bytes, song)
+        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+
+        # 上传到管理员私聊
+        msg = await context.bot.send_audio(
+            chat_id=config.ADMIN_ID,
+            audio=audio_bytes,
+            filename=filename,
+            title=song["name"],
+            performer=song["artist"],
+            caption="🔄 内联缓存中...",
+            duration=song["duration"] // 1000 if song.get("duration") else None,
+        )
+
+        if msg and msg.audio and msg.audio.file_id:
+            fid = msg.audio.file_id
+            # 删除管理员临时消息
+            try:
+                await context.bot.delete_message(chat_id=config.ADMIN_ID, message_id=msg.message_id)
+            except Exception:
+                pass
+            # 保存缓存
+            await asyncio.to_thread(db.set_file_id, song["id"], fid)
+            return fid
+        return None
+    except Exception as e:
+        logger.warning(f"内联缓存失败 {song.get('name')}: {e}")
+        return None
 
 
 async def _send_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id: int):
@@ -803,9 +841,26 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id_results = await asyncio.gather(*file_id_tasks)
     file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
 
-    # 优先用file_id缓存（秒发、零带宽），未缓存的用网易云直传URL
+    # 未缓存的歌曲：并发下载上传到管理员获取file_id（限制最多3首，超时8秒）
+    uncached = [s for s in valid_songs if not file_id_map.get(s["id"]) and url_map.get(s["id"])]
+    if uncached:
+        uncached = uncached[:3]  # 限制最多3首，避免超时
+        cache_tasks = [_cache_song_to_admin(context, s, url_map[s["id"]]) for s in uncached]
+        try:
+            new_fids = await asyncio.wait_for(asyncio.gather(*cache_tasks), timeout=8)
+            for s, fid in zip(uncached, new_fids):
+                if fid:
+                    file_id_map[s["id"]] = fid
+        except asyncio.TimeoutError:
+            logger.warning("内联缓存超时")
+
+    # 所有有file_id的歌曲用CachedAudio发出（秒发、零失败）
     results = []
     for song in valid_songs:
+        cached_fid = file_id_map.get(song["id"])
+        if not cached_fid:
+            continue
+
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
@@ -813,42 +868,12 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"{via_line}"
         )
 
-        # 检查file_id缓存
-        cached_fid = file_id_map.get(song["id"])
-        if cached_fid:
-            results.append(
-                InlineQueryResultCachedAudio(
-                    id=str(song["id"]),
-                    audio_file_id=cached_fid,
-                    caption=caption,
-                    parse_mode="HTML",
-                )
-            )
-            continue
-
-        # 未缓存：用 deep link 跳转到私聊播放（避免网易云CDN对Telegram海外IP限制导致curl failed）
-        url = url_map.get(song["id"])
-        if not url:
-            continue
-
-        bot_uname = context.bot.username or ""
-        deep_link = f"https://t.me/{bot_uname}?start=play_{song['id']}" if bot_uname else ""
-
         results.append(
-            InlineQueryResultArticle(
+            InlineQueryResultCachedAudio(
                 id=str(song["id"]),
-                title=f"🎵 {song['name']}",
-                description=f"{song['artist']} · 点击在私聊中播放",
-                thumb_url=None,
-                input_message_content=InputTextMessageContent(
-                    f"🎵 <b>{song['name']}</b>\n"
-                    f"👤 {song['artist']}\n"
-                    f"💿 {song['album']}\n\n"
-                    f"⏳ 点击下方按钮在私聊中播放~"
-                ),
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("▶️ 在私聊中播放", url=deep_link)
-                ]]) if deep_link else None
+                audio_file_id=cached_fid,
+                caption=caption,
+                parse_mode="HTML",
             )
         )
 
