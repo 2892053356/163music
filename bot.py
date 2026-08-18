@@ -1005,7 +1005,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         )
 
-    await query.answer(results, cache_time=0, is_personal=True)
+    try:
+        await query.answer(results, cache_time=0, is_personal=True)
+    except Exception as e:
+        logger.error(f"内联搜索answer失败 用户={user_label}(id={user.id}) 关键词='{keyword}' 结果数={len(results)}: {e}")
+        raise
 
 
 async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1605,7 +1609,18 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"更新 {update} 引发错误: {context.error}")
+    if update.inline_query:
+        q = update.inline_query
+        user = q.from_user
+        user_label = f"{user.username or user.first_name or user.id}"
+        logger.error(f"内联查询错误 用户={user_label}(id={user.id}) 关键词='{q.query}' 错误: {context.error}")
+    elif update.callback_query:
+        cb = update.callback_query
+        user = cb.from_user
+        user_label = f"{user.username or user.first_name or user.id}"
+        logger.error(f"回调错误 用户={user_label}(id={user.id}) data='{cb.data}' 错误: {context.error}")
+    else:
+        logger.error(f"更新 {update} 引发错误: {context.error}")
 
 
 # ============================================================
