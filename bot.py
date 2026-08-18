@@ -862,7 +862,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 限制结果数量
-    valid_songs = valid_songs[:10]
+    valid_songs = valid_songs[:config.INLINE_RESULTS_LIMIT]
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
@@ -875,6 +875,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 构建结果：已缓存用CachedAudio秒发，未缓存用直传URL（不做后台缓存，避免超时）
     results = []
     for song in valid_songs:
+        if len(results) >= 10:  # 最多显示10个结果
+            break
+
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
@@ -883,11 +886,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
         cached_fid = file_id_map.get(song["id"])
-        if cached_fid:
+        if cached_fid and str(cached_fid).strip():
             results.append(
                 InlineQueryResultCachedAudio(
                     id=str(song["id"]),
-                    audio_file_id=cached_fid,
+                    audio_file_id=str(cached_fid).strip(),
                     caption=caption,
                     parse_mode="HTML",
                 )
@@ -895,8 +898,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             # 未缓存：直传URL，用户选择后通过chosen_inline_result自动缓存
             url = url_map.get(song["id"])
-            if not url:
+            if not url or not str(url).strip():
                 continue
+            url = str(url).strip()
             if url.startswith("http://"):
                 url = "https://" + url[7:]
             results.append(
