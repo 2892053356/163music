@@ -1086,6 +1086,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔄 <b>服务管理</b>\n"
         "🔁 /restart — 重启Render服务（每4小时自动重启一次）\n"
         "📊 /cachetop — 预热热歌榜前100首缓存\n"
+        "📋 /cacheplaylist 歌单ID — 缓存指定歌单全部歌曲\n"
         "🗑️ /clearcache — 清除所有歌曲file_id缓存\n\n"
         "👑 <b>管理员管理</b>（仅主管理员）\n"
         "➕ /addadmin 用户ID — 添加管理员\n"
@@ -1603,6 +1604,106 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_do_cache())
 
 
+async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：缓存指定歌单的全部歌曲（带封面，低优先级）"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    arg = " ".join(context.args).strip()
+    if not arg:
+        await update.message.reply_text("⚠️ 用法：/cacheplaylist 歌单ID 或 歌单链接")
+        return
+
+    playlist_id = _extract_playlist_id(arg)
+    if not playlist_id:
+        await update.message.reply_text("❌ 无法识别歌单ID，请输入数字ID或完整链接。")
+        return
+
+    await update.message.reply_text(f"📊 正在获取歌单 {playlist_id} 的全部歌曲...")
+
+    async def _do_cache_playlist():
+        try:
+            songs = await asyncio.to_thread(api.get_toplist_songs, playlist_id, 500)
+            if not songs:
+                await context.bot.send_message(config.ADMIN_ID, "❌ 获取歌单失败或歌单为空。")
+                return
+
+            # 过滤已缓存的
+            to_cache = []
+            for s in songs:
+                if not db.get_file_id(s["id"]):
+                    to_cache.append(s)
+            already = len(songs) - len(to_cache)
+            await context.bot.send_message(
+                config.ADMIN_ID,
+                f"📊 歌单共{len(songs)}首，已缓存{already}首，待缓存{len(to_cache)}首，开始处理..."
+            )
+
+            success = 0
+            failed = 0
+            for idx, song in enumerate(to_cache, 1):
+                # 最低优先级：最近15秒有用户活动则暂停
+                while time.time() - last_user_activity < 15:
+                    await asyncio.sleep(5)
+
+                try:
+                    # 获取播放地址
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
+                    if not url:
+                        failed += 1
+                        continue
+                    # 下载
+                    resp = await asyncio.to_thread(requests_get, url, 60)
+                    if resp.status_code != 200 or not resp.content:
+                        failed += 1
+                        continue
+                    audio_bytes = io.BytesIO(resp.content)
+
+                    # 下载封面并嵌入ID3
+                    cover_url = song.get("cover", "")
+                    cover_bytes, cover_mime = await asyncio.to_thread(_download_cover, cover_url)
+                    audio_bytes = _tag_mp3(audio_bytes, song, cover_bytes=cover_bytes, cover_mime=cover_mime)
+
+                    filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+                    msg = await context.bot.send_audio(
+                        chat_id=config.ADMIN_ID,
+                        audio=audio_bytes,
+                        filename=filename,
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=f"歌单缓存 {idx}/{len(to_cache)}",
+                        thumbnail=cover_url if cover_url else None,
+                        duration=song["duration"] // 1000 if song.get("duration") else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
+                        success += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    logger.warning(f"歌单缓存失败 {song['name']}: {e}")
+                    failed += 1
+                # 每10首报告进度
+                if idx % 10 == 0:
+                    await context.bot.send_message(
+                        config.ADMIN_ID,
+                        f"⏳ 歌单缓存进度：{idx}/{len(to_cache)}（成功{success}，失败{failed}）"
+                    )
+                await asyncio.sleep(3)  # 最低优先级，间隔3秒
+
+            await context.bot.send_message(
+                config.ADMIN_ID,
+                f"✅ 歌单缓存完成！成功{success}首，失败{failed}首，跳过已缓存{already}首。"
+            )
+        except Exception as e:
+            logger.error(f"歌单缓存任务失败: {e}")
+            await context.bot.send_message(config.ADMIN_ID, f"❌ 歌单缓存失败: {e}")
+
+    asyncio.create_task(_do_cache_playlist())
+
+
 # ============================================================
 # 重启功能（管理员手动 + 定时自动）
 # ============================================================
@@ -1675,6 +1776,7 @@ def main():
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
     application.add_handler(CommandHandler("restart", cmd_restart))
     application.add_handler(CommandHandler("cachetop", cmd_cachetop))
+    application.add_handler(CommandHandler("cacheplaylist", cmd_cacheplaylist))
     application.add_handler(CommandHandler("clearcache", cmd_clearcache))
 
     # 管理员上传 .txt 文件设置 cookie
