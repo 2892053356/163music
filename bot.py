@@ -62,6 +62,7 @@ api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
 
 # 用户活动时间戳（用于缓存任务优先级控制：有用户请求时暂停缓存）
 last_user_activity = 0
+inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
 
 # ============================================================
 # 数据存储（Upstash Redis 持久化）
@@ -906,6 +907,17 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
         await query.answer(results, cache_time=1)
         return
+
+    # 防抖：纯字母输入（无中文/空格/数字）等待600ms，期间有新输入则跳过
+    is_pure_letters = keyword.isascii() and any(c.isalpha() for c in keyword) and not any(c.isspace() for c in keyword) and not any(c.isdigit() for c in keyword)
+    query_time = time.time()
+    inline_last_query[user.id] = (keyword, query_time)
+    if is_pure_letters and len(keyword) <= 8:
+        await asyncio.sleep(0.6)
+        latest = inline_last_query.get(user.id)
+        if not latest or latest[1] != query_time or latest[0] != keyword:
+            logger.info(f"内联防抖 跳过旧查询 '{keyword}'，用户已输入新内容")
+            return
 
     songs = []
     search_start = time.time()
