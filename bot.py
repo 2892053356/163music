@@ -148,8 +148,9 @@ async def audio_proxy_handler(request):
         if not play_url:
             return web.Response(status=404, text="Song not available")
 
-        # 下载音频
-        resp = await asyncio.to_thread(requests.get, play_url, timeout=60)
+        # 下载音频（带Referer头，避免网易云CDN限制）
+        headers = {"Referer": "https://music.163.com/"}
+        resp = await asyncio.to_thread(requests.get, play_url, timeout=60, headers=headers)
         if resp.status_code != 200:
             return web.Response(status=502, text="Failed to download audio")
         audio_bytes = io.BytesIO(resp.content)
@@ -898,19 +899,14 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             )
         else:
-            # 未缓存：直传URL，用户选择后通过chosen_inline_result自动缓存
-            url = url_map.get(song["id"])
-            if not url or not str(url).strip():
-                logger.warning(f"内联结果 跳过无URL歌曲 {song['name']} url={repr(url)}")
-                continue
-            url = str(url).strip()
-            if url.startswith("http://"):
-                url = "https://" + url[7:]
-            logger.info(f"内联结果 直传歌曲 {song['name']} url长度={len(url)}")
+            # 未缓存：用bot音频代理端点（Render代下载，避免网易云CDN对Telegram海外IP限制）
+            from urllib.parse import quote
+            proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}"
+            logger.info(f"内联结果 代理歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
             results.append(
                 InlineQueryResultAudio(
                     id=f"url_{song['id']}",
-                    audio_url=url,
+                    audio_url=proxy_url,
                     title=song["name"],
                     performer=song["artist"],
                     audio_duration=song["duration"] // 1000 if song.get("duration") else None,
