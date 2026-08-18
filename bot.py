@@ -887,15 +887,6 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             )
 
-        results.append(
-            InlineQueryResultCachedAudio(
-                id=str(song["id"]),
-                audio_file_id=cached_fid,
-                caption=caption,
-                parse_mode="HTML",
-            )
-        )
-
     if not results:
         results.append(
             InlineQueryResultArticle(
