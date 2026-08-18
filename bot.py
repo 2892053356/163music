@@ -34,6 +34,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     InlineQueryHandler,
+    ChosenInlineResultHandler,
     CallbackQueryHandler,
     MessageHandler,
     filters,
@@ -871,26 +872,44 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id_results = await asyncio.gather(*file_id_tasks)
     file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
 
-    # 未缓存的歌曲：后台异步缓存（不等待，避免阻塞内联查询导致超时）
-    uncached = [s for s in valid_songs if not file_id_map.get(s["id"]) and url_map.get(s["id"])]
-    if uncached:
-        uncached = uncached[:3]  # 最多同时缓存3首
-        for s in uncached:
-            asyncio.create_task(_cache_song_to_admin(context, s, url_map[s["id"]]))
-
-    # 所有有file_id的歌曲用CachedAudio发出（秒发、零失败）
+    # 构建结果：已缓存用CachedAudio秒发，未缓存用直传URL（不做后台缓存，避免超时）
     results = []
     for song in valid_songs:
-        cached_fid = file_id_map.get(song["id"])
-        if not cached_fid:
-            continue
-
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
             f"👤 {song['artist']}\n"
             f"💿 {song['album']}"
             f"{via_line}"
         )
+
+        cached_fid = file_id_map.get(song["id"])
+        if cached_fid:
+            results.append(
+                InlineQueryResultCachedAudio(
+                    id=str(song["id"]),
+                    audio_file_id=cached_fid,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            )
+        else:
+            # 未缓存：直传URL，用户选择后通过chosen_inline_result自动缓存
+            url = url_map.get(song["id"])
+            if not url:
+                continue
+            if url.startswith("http://"):
+                url = "https://" + url[7:]
+            results.append(
+                InlineQueryResultAudio(
+                    id=f"url_{song['id']}",
+                    audio_url=url,
+                    title=song["name"],
+                    performer=song["artist"],
+                    audio_duration=song["duration"] // 1000 if song.get("duration") else None,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            )
 
         results.append(
             InlineQueryResultCachedAudio(
@@ -902,22 +921,57 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     if not results:
-        if uncached:
-            desc = "正在后台缓存，请几秒后再试"
-            msg_text = f"⏳ 「{keyword}」的歌曲正在缓存中，请几秒后再试一次~"
-        else:
-            desc = "换个关键词试试"
-            msg_text = f"😢 「{keyword}」暂无可用结果。"
         results.append(
             InlineQueryResultArticle(
                 id="no_result",
-                title=f"「{keyword}」暂无缓存",
-                description=desc,
-                input_message_content=InputTextMessageContent(msg_text),
+                title=f"「{keyword}」暂无可用结果",
+                description="换个关键词试试，或用 /music 搜索",
+                input_message_content=InputTextMessageContent(
+                    f"😢 「{keyword}」暂无可用结果。\n💡 试试用 /music {keyword} 搜索播放"
+                ),
             )
         )
 
     await query.answer(results, cache_time=0, is_personal=True)
+
+
+async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """用户选择内联结果后触发：未缓存歌曲自动缓存"""
+    chosen = update.chosen_inline_result
+    if not chosen or not chosen.result_id:
+        return
+    # 未缓存歌曲的result_id以 "url_" 开头
+    if not chosen.result_id.startswith("url_"):
+        return
+    try:
+        song_id = int(chosen.result_id[4:])
+    except ValueError:
+        return
+
+    # 检查是否已缓存
+    if await asyncio.to_thread(db.get_file_id, song_id):
+        return
+
+    # 获取播放地址并缓存
+    try:
+        url_result = await asyncio.to_thread(api.get_song_url, [song_id], level=config.MUSIC_QUALITY)
+        url = None
+        for item in url_result.get("data", []):
+            if item.get("id") == song_id:
+                url = item.get("url")
+                break
+        if not url:
+            return
+        # 获取歌曲详情
+        detail = await asyncio.to_thread(api.get_song_detail, [song_id])
+        songs_detail = detail.get("songs", [])
+        if not songs_detail:
+            return
+        song = songs_detail[0]
+        # 后台缓存到管理员
+        asyncio.create_task(_cache_song_to_admin(context, song, url))
+    except Exception as e:
+        logger.warning(f"chosen_inline_result 缓存失败: {e}")
 
 
 # ============================================================
@@ -1532,6 +1586,7 @@ def main():
 
     # 内联搜索
     application.add_handler(InlineQueryHandler(handle_inline_query))
+    application.add_handler(ChosenInlineResultHandler(handle_chosen_inline_result))
 
     # 按钮回调
     application.add_handler(CallbackQueryHandler(handle_callback))
