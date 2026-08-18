@@ -782,14 +782,25 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     songs = []
-    for attempt in range(3):
+    search_start = time.time()
+    for attempt in range(2):  # 最多2次尝试，总超时5秒
         try:
-            songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT)
+            remaining = 5 - (time.time() - search_start)
+            if remaining <= 0:
+                break
+            songs = await asyncio.wait_for(
+                asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT),
+                timeout=remaining
+            )
+            if songs:
+                break
+        except asyncio.TimeoutError:
+            logger.warning(f"内联搜索 第{attempt+1}次超时")
             break
         except Exception as e:
             logger.warning(f"内联搜索 第{attempt+1}次失败: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1)
+            if attempt < 1:
+                await asyncio.sleep(0.5)
     if not songs:
         logger.error("内联搜索失败（3次重试后）")
 
