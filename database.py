@@ -105,6 +105,17 @@ class UpstashDB:
     def set_file_id(self, song_id: int, file_id: str):
         self._exec("SET", f"cache:file_id:{song_id}", file_id)
 
+    def clear_all_file_ids(self) -> int:
+        """清除所有file_id缓存，返回删除数量"""
+        keys = self._exec("KEYS", "cache:file_id:*")
+        if not keys:
+            return 0
+        count = 0
+        for k in keys:
+            self._exec("DEL", k)
+            count += 1
+        return count
+
     # ---- 管理员管理（主管理员来自环境变量，附加管理员存Redis） ----
     def get_admins(self) -> list:
         """获取所有附加管理员ID列表"""

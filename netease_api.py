@@ -93,12 +93,21 @@ class NeteaseAPI:
         return hashlib.md5(random.randbytes(16)).hexdigest()
 
     def _post(self, path: str, data: dict) -> dict:
-        """发送 weapi POST 请求"""
+        """发送 weapi POST 请求，带3次重试"""
         url = f"{_BASE_URL}{path}"
         payload = _weapi(data)
-        resp = self.session.post(url, data=payload, timeout=60)
-        resp.raise_for_status()
-        return resp.json()
+        last_error = None
+        for attempt in range(3):
+            try:
+                resp = self.session.post(url, data=payload, timeout=30)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    import time
+                    time.sleep(1 * (attempt + 1))
+        raise last_error
 
     # ----------------------------------------------------------
     # 搜索

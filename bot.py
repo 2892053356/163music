@@ -159,12 +159,28 @@ async def audio_proxy_handler(request):
         if not play_url:
             return web.Response(status=404, text="Song not available")
 
-        # 下载音频（带Referer头，避免网易云CDN限制）
-        headers = {"Referer": "https://music.163.com/"}
-        resp = await asyncio.to_thread(requests.get, play_url, timeout=60, headers=headers)
-        if resp.status_code != 200:
-            return web.Response(status=502, text="Failed to download audio")
-        audio_bytes = io.BytesIO(resp.content)
+        # 下载音频（连接复用+3次重试+Referer头+HTTP转HTTPS），尝试2种音质
+        audio_content = None
+        for try_quality in [quality, "higher"]:
+            if try_quality != quality:
+                url_result2 = api.get_song_url([sid], level=try_quality)
+                play_url = None
+                for item in url_result2.get("data", []):
+                    if item.get("id") == sid:
+                        play_url = item.get("url")
+                        break
+                if not play_url:
+                    continue
+            resp = await asyncio.to_thread(requests_get, play_url, 45)
+            if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
+                audio_content = resp.content
+                logger.info(f"代理端点 song_id={sid} 音质={try_quality} 下载成功 大小={len(audio_content)}bytes")
+                break
+            logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载失败 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
+
+        if not audio_content:
+            return web.Response(status=502, text="Audio download failed")
+        audio_bytes = io.BytesIO(audio_content)
 
         # 写入ID3标签
         song = {"id": sid, "name": name, "artist": artist, "album": album or name}
@@ -472,8 +488,8 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     if not url:
                         failed += 1
                         continue
-                    resp = await asyncio.to_thread(requests_get, url, 60)
-                    if resp.status_code != 200:
+                    resp = await asyncio.to_thread(requests_get, url, 45)
+                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
                         failed += 1
                         continue
                     audio_bytes = io.BytesIO(resp.content)
@@ -639,7 +655,9 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     try:
         if edit:
             await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-        resp = requests_get(url, timeout=60)
+        resp = requests_get(url, timeout=45)
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+            raise Exception(f"下载异常: 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
         audio_bytes = io.BytesIO(resp.content)
         # 写入ID3标签，确保Telegram显示正确的标题和艺术家
         audio_bytes = _tag_mp3(audio_bytes, song)
@@ -695,9 +713,21 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             )
 
 
-def requests_get(url: str, timeout: int = 60):
-    """同步 GET 请求（用于在异步函数中下载文件）"""
-    return requests.get(url, timeout=timeout)
+# 共享下载Session（连接复用）+ 重试适配器
+_download_session = requests.Session()
+_download_session.headers.update({"Referer": "https://music.163.com/"})
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+_download_session.mount("http://", HTTPAdapter(max_retries=_retry))
+_download_session.mount("https://", HTTPAdapter(max_retries=_retry))
+
+
+def requests_get(url: str, timeout: int = 45):
+    """同步 GET 请求（连接复用+3次重试+HTTP转HTTPS+Referer头）"""
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
+    return _download_session.get(url, timeout=timeout)
 
 
 async def _cache_song_to_admin(context, song, url):
@@ -705,8 +735,9 @@ async def _cache_song_to_admin(context, song, url):
     cache_admin_id = 8684066933  # 内联缓存专用管理员
     try:
         # 下载
-        resp = await asyncio.to_thread(requests_get, url, 30)
-        if resp.status_code != 200 or not resp.content:
+        resp = await asyncio.to_thread(requests_get, url, 45)
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+            logger.warning(f"内联缓存下载失败 song_id={song.get('id')} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
             return None
         audio_bytes = io.BytesIO(resp.content)
         audio_bytes = _tag_mp3(audio_bytes, song)
@@ -837,12 +868,29 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=1)
         return
 
-    # 防抖：纯字母输入等待600ms，期间有新输入则跳过
+    # 防抖：纯字母输入
     is_pure_letters = keyword.isascii() and any(c.isalpha() for c in keyword) and not any(c.isspace() for c in keyword) and not any(c.isdigit() for c in keyword)
+
+    # 短输入(≤3字母)直接提示，不搜索
+    if is_pure_letters and len(keyword) <= 3:
+        results = [
+            InlineQueryResultArticle(
+                id="typing",
+                title=f"继续输入...（当前：{keyword}）",
+                description="输入更多字母以搜索歌曲",
+                input_message_content=InputTextMessageContent(
+                    f"🎵 继续输入更多字母搜索歌曲~"
+                ),
+            )
+        ]
+        await query.answer(results, cache_time=1)
+        return
+
+    # 纯字母(4-8位)等待800ms防抖，期间有新输入则跳过
     query_time = time.time()
     inline_last_query[user.id] = (keyword, query_time)
     if is_pure_letters and len(keyword) <= 8:
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.8)
         latest = inline_last_query.get(user.id)
         if not latest or latest[1] != query_time or latest[0] != keyword:
             logger.info(f"内联防抖 跳过旧查询 '{keyword}'")
@@ -853,9 +901,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     songs = []
     search_start = time.time()
-    for attempt in range(2):  # 最多2次尝试，总超时5秒
+    for attempt in range(1):  # 只尝试1次，总超时3秒，避免查询过期
         try:
-            remaining = 5 - (time.time() - search_start)
+            remaining = 3 - (time.time() - search_start)
             if remaining <= 0:
                 break
             songs = await asyncio.wait_for(
@@ -1491,8 +1539,8 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         failed += 1
                         continue
                     # 下载
-                    resp = await asyncio.to_thread(requests_get, url, 60)
-                    if resp.status_code != 200:
+                    resp = await asyncio.to_thread(requests_get, url, 45)
+                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
                         failed += 1
                         continue
                     audio_bytes = io.BytesIO(resp.content)
