@@ -62,6 +62,7 @@ api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
 
 # 用户活动时间戳（用于缓存任务优先级控制：有用户请求时暂停缓存）
 last_user_activity = 0
+inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
 
 # ============================================================
 # 数据存储（Upstash Redis 持久化）
@@ -190,6 +191,8 @@ async def audio_proxy_handler(request):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     _register_user(user.id)
+    user_label = f"{user.username or user.first_name or user.id}"
+    logger.info(f"/start 用户={user_label}(id={user.id})")
 
     if _is_banned(user.id):
         await update.message.reply_text("⛔ 你已被管理员封禁。")
@@ -267,6 +270,8 @@ async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     _register_user(user.id)
+    user_label = f"{user.username or user.first_name or user.id}"
+    logger.info(f"/music 用户={user_label}(id={user.id}) 关键词='{keyword}'")
     await _do_search(update, context, keyword)
 
 
@@ -373,6 +378,8 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     _register_user(user.id)
+    user_label = f"{user.username or user.first_name or user.id}"
+    logger.info(f"/playlist 用户={user_label}(id={user.id}) 歌单ID={playlist_id}")
     status = await update.message.reply_text(f"🔍 正在获取歌单 {playlist_id} ...")
 
     try:
@@ -547,6 +554,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id: int, edit: bool = False):
     """获取歌曲信息，下载音频并发送（带歌词按钮）"""
+    user = update.effective_user
+    user_label = f"{user.username or user.first_name or user.id}"
+    logger.info(f"播放歌曲 用户={user_label}(id={user.id}) song_id={song_id}")
     # 获取歌曲详情
     try:
         detail = api.get_song_detail([song_id])
@@ -827,6 +837,20 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=1)
         return
 
+    # 防抖：纯字母输入等待600ms，期间有新输入则跳过
+    is_pure_letters = keyword.isascii() and any(c.isalpha() for c in keyword) and not any(c.isspace() for c in keyword) and not any(c.isdigit() for c in keyword)
+    query_time = time.time()
+    inline_last_query[user.id] = (keyword, query_time)
+    if is_pure_letters and len(keyword) <= 8:
+        await asyncio.sleep(0.6)
+        latest = inline_last_query.get(user.id)
+        if not latest or latest[1] != query_time or latest[0] != keyword:
+            logger.info(f"内联防抖 跳过旧查询 '{keyword}'")
+            return
+
+    user_label = f"{user.username or user.first_name or user.id}"
+    logger.info(f"内联搜索 用户={user_label}(id={user.id}) 关键词='{keyword}'")
+
     songs = []
     search_start = time.time()
     for attempt in range(2):  # 最多2次尝试，总超时5秒
@@ -948,6 +972,10 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
         song_id = int(chosen.result_id[4:])
     except ValueError:
         return
+
+    user = chosen.from_user
+    user_label = f"{user.username or user.first_name or user.id}"
+    logger.info(f"内联选择 用户={user_label}(id={user.id}) song_id={song_id} query='{chosen.query}'")
 
     # 检查是否已缓存
     if await asyncio.to_thread(db.get_file_id, song_id):
