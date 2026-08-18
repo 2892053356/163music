@@ -271,11 +271,11 @@ async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str):
-    """执行搜索并展示结果按钮"""
+    """执行搜索并展示结果按钮（分页）"""
     status_msg = await update.message.reply_text(f"🔍 正在搜索「{keyword}」...")
 
     try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, config.SEARCH_RESULTS_LIMIT)
+        songs = await asyncio.to_thread(api.search_songs_simple, keyword, 30)
     except Exception as e:
         logger.error(f"搜索失败: {e}")
         await status_msg.edit_text("❌ 搜索失败，请稍后重试。")
@@ -287,20 +287,51 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
         await status_msg.edit_text(f"😢 没有找到与「{keyword}」相关的歌曲。")
         return
 
-    # 构建按钮列表（每行一首）
+    # 存储搜索结果到user_data，供分页使用
+    context.user_data["search_songs"] = songs
+    context.user_data["search_keyword"] = keyword
+
+    await _render_search_page(update, context, 0, status_msg)
+
+
+async def _render_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int, status_msg=None):
+    """渲染搜索结果的某一页"""
+    songs = context.user_data.get("search_songs", [])
+    keyword = context.user_data.get("search_keyword", "")
+    page_size = 10
+    total = len(songs)
+    total_pages = (total + page_size - 1) // page_size
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * page_size
+    end = min(start + page_size, total)
+    page_songs = songs[start:end]
+
+    # 构建歌曲按钮
     keyboard = []
-    for i, song in enumerate(songs):
-        label = f"{i+1}. {song['name']} - {song['artist']} ({_fmt_duration(song['duration'])})"
-        # callback_data 格式: play:<song_id>
+    for i, song in enumerate(page_songs):
+        idx = start + i + 1
+        label = f"{idx}. {song['name']} - {song['artist']} ({_fmt_duration(song['duration'])})"
         keyboard.append([
             InlineKeyboardButton(label, callback_data=f"play:{song['id']}")
         ])
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await status_msg.edit_text(
-        f"✅ 找到以下歌曲（点击播放）：",
-        reply_markup=reply_markup,
-    )
+    # 分页导航按钮
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"searchpage:{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"searchpage:{page+1}"))
+    if nav:
+        keyboard.append(nav)
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = f"✅ 找到 {total} 首「{keyword}」（第 {page+1}/{total_pages} 页，点击播放）："
+
+    if status_msg:
+        await status_msg.edit_text(text, reply_markup=reply_markup)
+    else:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
 
 
 # ============================================================
@@ -483,6 +514,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("play:"):
         song_id = int(data.split(":", 1)[1])
         await _play_song(update, context, song_id, edit=True)
+    elif data.startswith("searchpage:"):
+        page = int(data.split(":", 1)[1])
+        await _render_search_page(update, context, page)
     elif data.startswith("lyric:"):
         song_id = int(data.split(":", 1)[1])
         await _send_lyrics(update, context, song_id)
