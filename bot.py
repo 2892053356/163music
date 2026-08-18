@@ -100,11 +100,11 @@ def _song_caption(song: dict) -> str:
     )
 
 
-def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
-    """给MP3写入ID3标签（标题、艺术家、专辑），确保Telegram显示正确信息"""
+def _tag_mp3(audio_bytes: io.BytesIO, song: dict, cover_bytes: bytes = None, cover_mime: str = 'image/jpeg') -> io.BytesIO:
+    """给MP3写入ID3标签（标题、艺术家、专辑、封面），确保Telegram显示正确信息"""
     try:
         from mutagen.mp3 import MP3
-        from mutagen.id3 import ID3, TIT2, TPE1, TALB
+        from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC
         audio_bytes.seek(0)
         audio = MP3(audio_bytes)
         if audio.tags is None:
@@ -112,6 +112,15 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
         audio.tags.add(TIT2(encoding=3, text=[song["name"]]))
         audio.tags.add(TPE1(encoding=3, text=[song["artist"]]))
         audio.tags.add(TALB(encoding=3, text=[song["album"]]))
+        if cover_bytes:
+            audio.tags.add(APIC(
+                encoding=3,
+                mime=cover_mime,
+                type=3,
+                desc='Cover',
+                data=cover_bytes,
+            ))
+            logger.info(f"ID3写入封面成功: {song['name']} mime={cover_mime} 大小={len(cover_bytes)}")
         audio_bytes.seek(0)
         audio.save(audio_bytes)
         audio_bytes.seek(0)
@@ -119,6 +128,28 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
         logger.warning(f"写入ID3标签失败: {e}")
         audio_bytes.seek(0)
     return audio_bytes
+
+
+def _download_cover(cover_url: str) -> tuple:
+    """下载封面图片，返回 (bytes, mime) 或 (None, None)。带2次重试，超时15秒。"""
+    if not cover_url:
+        return None, None
+    if cover_url.startswith("http://"):
+        cover_url = "https://" + cover_url[7:]
+    for attempt in range(2):
+        try:
+            resp = requests.get(cover_url, timeout=15)
+            if resp.status_code == 200 and resp.content:
+                ct = resp.headers.get("Content-Type", "image/jpeg")
+                mime = "image/png" if "png" in ct else "image/jpeg"
+                logger.info(f"封面下载成功: {len(resp.content)}bytes mime={mime}")
+                return resp.content, mime
+            logger.warning(f"封面下载状态码异常: {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"封面下载第{attempt+1}次失败: {e}")
+            if attempt < 1:
+                import time; time.sleep(1)
+    return None, None
 
 
 async def audio_proxy_handler(request):
@@ -165,9 +196,20 @@ async def audio_proxy_handler(request):
             return web.Response(status=502, text="Failed to download audio")
         audio_bytes = io.BytesIO(resp.content)
 
-        # 写入ID3标签
+        # 获取封面URL并下载（写入ID3标签，内联音频必须靠内嵌封面）
+        cover_bytes, cover_mime = None, 'image/jpeg'
+        try:
+            detail = api.get_song_detail([sid])
+            songs_detail = detail.get("songs", [])
+            if songs_detail:
+                cover_url = songs_detail[0].get("al", {}).get("picUrl", "")
+                cover_bytes, cover_mime = await asyncio.to_thread(_download_cover, cover_url)
+        except Exception as ce:
+            logger.warning(f"代理端点获取封面失败: {ce}")
+
+        # 写入ID3标签（含封面）
         song = {"id": sid, "name": name, "artist": artist, "album": album or name}
-        tagged = _tag_mp3(audio_bytes, song)
+        tagged = _tag_mp3(audio_bytes, song, cover_bytes=cover_bytes, cover_mime=cover_mime)
         tagged.seek(0)
 
         return web.Response(
@@ -456,9 +498,13 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
             try:
                 cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
+                cover = song.get("cover", "")
+                if cover and cover.startswith("http://"):
+                    cover = "https://" + cover[7:]
                 if cached:
                     await context.bot.send_audio(
-                        chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
+                        chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML",
+                        thumbnail=cover if cover else None,
                     )
                 else:
                     url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
@@ -479,6 +525,7 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                         performer=song["artist"],
                         caption=caption,
                         parse_mode="HTML",
+                        thumbnail=cover if cover else None,
                         duration=song["duration"] // 1000 if song["duration"] else None,
                     )
                     if msg and msg.audio and msg.audio.file_id:
@@ -559,12 +606,15 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             return
 
         sd = songs_detail[0]
+        cover_url = sd.get("al", {}).get("picUrl", "")
+        if cover_url and cover_url.startswith("http://"):
+            cover_url = "https://" + cover_url[7:]
         song = {
             "id": sd["id"],
             "name": sd["name"],
             "artist": "/".join(a["name"] for a in sd.get("ar", [])),
             "album": sd.get("al", {}).get("name", ""),
-            "cover": sd.get("al", {}).get("picUrl", ""),
+            "cover": cover_url,
             "duration": sd.get("dt", 0),
         }
     except Exception as e:
@@ -631,8 +681,12 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
         resp = requests_get(url, timeout=60)
         audio_bytes = io.BytesIO(resp.content)
-        # 写入ID3标签，确保Telegram显示正确的标题和艺术家
-        audio_bytes = _tag_mp3(audio_bytes, song)
+
+        # 下载封面并写入ID3标签（确保Telegram显示封面）
+        cover_bytes, cover_mime = _download_cover(song.get("cover", ""))
+
+        # 写入ID3标签（含封面）
+        audio_bytes = _tag_mp3(audio_bytes, song, cover_bytes=cover_bytes, cover_mime=cover_mime)
         filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
     except Exception as e:
         logger.error(f"下载音频失败: {e}")
@@ -699,8 +753,22 @@ async def _cache_song_to_admin(context, song, url):
         if resp.status_code != 200 or not resp.content:
             return None
         audio_bytes = io.BytesIO(resp.content)
-        audio_bytes = _tag_mp3(audio_bytes, song)
+
+        # 下载封面并写入ID3标签
+        cover_url = song.get("cover", "")
+        if not cover_url and "al" in song:
+            cover_url = song["al"].get("picUrl", "")
+        cover_bytes, cover_mime = await asyncio.to_thread(_download_cover, cover_url)
+
+        audio_bytes = _tag_mp3(audio_bytes, song, cover_bytes=cover_bytes, cover_mime=cover_mime)
         filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+
+        # 提取封面URL（兼容两种格式）
+        cover = song.get("cover", "")
+        if not cover and "al" in song:
+            cover = song["al"].get("picUrl", "")
+        if cover and cover.startswith("http://"):
+            cover = "https://" + cover[7:]
 
         # 上传到管理员私聊
         msg = await context.bot.send_audio(
@@ -710,6 +778,7 @@ async def _cache_song_to_admin(context, song, url):
             title=song["name"],
             performer=song["artist"],
             caption="🔄 内联缓存中...",
+            thumbnail=cover if cover else None,
             duration=song["duration"] // 1000 if song.get("duration") else None,
         )
 
@@ -829,9 +898,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     songs = []
     search_start = time.time()
-    for attempt in range(2):  # 最多2次尝试，总超时5秒
+    for attempt in range(1):  # 只尝试1次，总超时3秒，避免超过Telegram 10秒限制
         try:
-            remaining = 5 - (time.time() - search_start)
+            remaining = 3 - (time.time() - search_start)
             if remaining <= 0:
                 break
             songs = await asyncio.wait_for(
@@ -841,20 +910,16 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             if songs:
                 break
         except asyncio.TimeoutError:
-            logger.warning(f"内联搜索 第{attempt+1}次超时")
+            logger.warning(f"内联搜索 超时")
             break
         except Exception as e:
-            logger.warning(f"内联搜索 第{attempt+1}次失败: {e}")
-            if attempt < 1:
-                await asyncio.sleep(0.5)
+            logger.warning(f"内联搜索 失败: {e}")
     if not songs:
-        logger.error("内联搜索失败（3次重试后）")
+        logger.error("内联搜索失败")
 
     # 调试日志：输出搜索关键词和返回结果
     song_names = [f"{s['name']}({s['artist']})" for s in songs[:5]]
     logger.info(f"内联搜索 关键词='{keyword}' 返回{len(songs)}首: {', '.join(song_names)}")
-
-    await asyncio.to_thread(db.incr_search)
 
     if not songs:
         results = [
@@ -877,9 +942,14 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
     # 并发获取所有歌曲的file_id缓存（避免同步调用阻塞事件循环）
-    file_id_tasks = [asyncio.to_thread(db.get_file_id, song["id"]) for song in valid_songs]
-    file_id_results = await asyncio.gather(*file_id_tasks)
-    file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
+    # 并发获取file_id缓存，超时2秒则全部用代理URL
+    file_id_map = {}
+    try:
+        file_id_tasks = [asyncio.to_thread(db.get_file_id, song["id"]) for song in valid_songs]
+        file_id_results = await asyncio.wait_for(asyncio.gather(*file_id_tasks), timeout=2)
+        file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
+    except asyncio.TimeoutError:
+        logger.warning("内联搜索 file_id查询超时，全部使用代理URL")
 
     # 构建结果：已缓存用CachedAudio秒发，未缓存用代理端点URL
     results = []
@@ -963,12 +1033,23 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
                 break
         if not url:
             return
-        # 获取歌曲详情
+        # 获取歌曲详情并转换为统一格式
         detail = await asyncio.to_thread(api.get_song_detail, [song_id])
         songs_detail = detail.get("songs", [])
         if not songs_detail:
             return
-        song = songs_detail[0]
+        sd = songs_detail[0]
+        cover_url = sd.get("al", {}).get("picUrl", "")
+        if cover_url and cover_url.startswith("http://"):
+            cover_url = "https://" + cover_url[7:]
+        song = {
+            "id": sd["id"],
+            "name": sd["name"],
+            "artist": "/".join(a["name"] for a in sd.get("ar", [])),
+            "album": sd.get("al", {}).get("name", ""),
+            "cover": cover_url,
+            "duration": sd.get("dt", 0),
+        }
         # 后台缓存到管理员
         asyncio.create_task(_cache_song_to_admin(context, song, url))
     except Exception as e:
@@ -1004,7 +1085,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
         "🔄 <b>服务管理</b>\n"
         "🔁 /restart — 重启Render服务（每4小时自动重启一次）\n"
-        "📊 /cachetop — 预热热歌榜前100首缓存\n\n"
+        "📊 /cachetop — 预热热歌榜前100首缓存\n"
+        "🗑️ /clearcache — 清除所有歌曲file_id缓存\n\n"
         "👑 <b>管理员管理</b>（仅主管理员）\n"
         "➕ /addadmin 用户ID — 添加管理员\n"
         "➖ /removeadmin 用户ID — 移除管理员\n"
@@ -1422,6 +1504,16 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 排行榜预热缓存（管理员触发，后台执行）
 # ============================================================
 
+async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：清除所有file_id缓存，重新缓存时会带封面"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    count = await asyncio.to_thread(db.clear_all_file_ids)
+    await update.message.reply_text(f"🗑️ 已清除 {count} 首歌曲的 file_id 缓存。\n下次播放时会重新下载并缓存（带封面）。")
+
+
 async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员触发：获取热歌榜前100，下载并发送给管理员，缓存file_id"""
     user = update.effective_user
@@ -1471,6 +1563,9 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     audio_bytes = _tag_mp3(audio_bytes, song)
                     filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
                     # 发送给管理员
+                    cover = song.get("cover", "")
+                    if cover and cover.startswith("http://"):
+                        cover = "https://" + cover[7:]
                     msg = await context.bot.send_audio(
                         chat_id=config.ADMIN_ID,
                         audio=audio_bytes,
@@ -1478,6 +1573,7 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         title=song["name"],
                         performer=song["artist"],
                         caption=f"缓存预热 {idx}/{len(to_cache)}",
+                        thumbnail=cover if cover else None,
                         duration=song["duration"] // 1000 if song["duration"] else None,
                     )
                     if msg and msg.audio and msg.audio.file_id:
@@ -1579,6 +1675,7 @@ def main():
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
     application.add_handler(CommandHandler("restart", cmd_restart))
     application.add_handler(CommandHandler("cachetop", cmd_cachetop))
+    application.add_handler(CommandHandler("clearcache", cmd_clearcache))
 
     # 管理员上传 .txt 文件设置 cookie
     application.add_handler(MessageHandler(filters.Document.ALL, handle_admin_document))
