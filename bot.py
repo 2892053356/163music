@@ -887,10 +887,12 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         cached_fid = file_id_map.get(song["id"])
         if cached_fid and str(cached_fid).strip():
+            fid = str(cached_fid).strip()
+            logger.info(f"内联结果 缓存歌曲 {song['name']} file_id长度={len(fid)} 前20位={fid[:20]}")
             results.append(
                 InlineQueryResultCachedAudio(
                     id=str(song["id"]),
-                    audio_file_id=str(cached_fid).strip(),
+                    audio_file_id=fid,
                     caption=caption,
                     parse_mode="HTML",
                 )
@@ -899,10 +901,12 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             # 未缓存：直传URL，用户选择后通过chosen_inline_result自动缓存
             url = url_map.get(song["id"])
             if not url or not str(url).strip():
+                logger.warning(f"内联结果 跳过无URL歌曲 {song['name']} url={repr(url)}")
                 continue
             url = str(url).strip()
             if url.startswith("http://"):
                 url = "https://" + url[7:]
+            logger.info(f"内联结果 直传歌曲 {song['name']} url长度={len(url)}")
             results.append(
                 InlineQueryResultAudio(
                     id=f"url_{song['id']}",
