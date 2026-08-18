@@ -1545,9 +1545,9 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = 0
             failed = 0
             for idx, song in enumerate(to_cache, 1):
-                # 最低优先级：最近15秒有用户活动则暂停，等待用户空闲
-                while time.time() - last_user_activity < 15:
-                    await asyncio.sleep(5)
+                # 最低优先级：最近5秒有用户活动则暂停，等待用户空闲
+                while time.time() - last_user_activity < 5:
+                    await asyncio.sleep(2)
 
                 try:
                     # 获取播放地址
@@ -1644,9 +1644,9 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = 0
             failed = 0
             for idx, song in enumerate(to_cache, 1):
-                # 最低优先级：最近15秒有用户活动则暂停
-                while time.time() - last_user_activity < 15:
-                    await asyncio.sleep(5)
+                # 最低优先级：最近5秒有用户活动则暂停
+                while time.time() - last_user_activity < 5:
+                    await asyncio.sleep(2)
 
                 try:
                     # 获取播放地址
