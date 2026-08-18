@@ -826,44 +826,8 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=0, is_personal=True)
         return
 
-    # 批量获取所有歌曲的播放地址
-    song_ids = [s["id"] for s in songs]
-    url_map = {}
-    url_result = None
-    for attempt in range(3):
-        try:
-            url_result = await asyncio.to_thread(api.get_song_url, song_ids, level=config.MUSIC_QUALITY)
-            break
-        except Exception as e:
-            logger.warning(f"批量获取播放地址 第{attempt+1}次失败: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1)
-    if url_result:
-        for item in url_result.get("data", []):
-            sid = item.get("id")
-            u = item.get("url")
-            if sid and u:
-                url_map[sid] = u
-
-    # 过滤有播放地址的歌曲
-    results = []
-    valid_songs = [s for s in songs if url_map.get(s["id"])]
-    if not valid_songs:
-        results.append(
-            InlineQueryResultArticle(
-                id="no_url",
-                title=f"「{keyword}」的歌曲均无法播放",
-                description="可能需要VIP或已下架",
-                input_message_content=InputTextMessageContent(
-                    f"😢 「{keyword}」相关歌曲均无法获取播放地址。"
-                ),
-            )
-        )
-        await query.answer(results, cache_time=0, is_personal=True)
-        return
-
-    # 限制结果数量
-    valid_songs = valid_songs[:config.INLINE_RESULTS_LIMIT]
+    # 使用代理端点，无需预获取播放地址，直接用所有搜索结果
+    valid_songs = songs[:10]  # 最多10首
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
@@ -873,11 +837,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id_results = await asyncio.gather(*file_id_tasks)
     file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
 
-    # 构建结果：已缓存用CachedAudio秒发，未缓存用直传URL（不做后台缓存，避免超时）
+    # 构建结果：已缓存用CachedAudio秒发，未缓存用代理端点URL
     results = []
     for song in valid_songs:
-        if len(results) >= 10:  # 最多显示10个结果
-            break
 
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
