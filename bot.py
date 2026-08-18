@@ -275,7 +275,7 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
     status_msg = await update.message.reply_text(f"🔍 正在搜索「{keyword}」...")
 
     try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, 30)
+        songs = await asyncio.to_thread(api.search_songs_simple, keyword, 50)
     except Exception as e:
         logger.error(f"搜索失败: {e}")
         await status_msg.edit_text("❌ 搜索失败，请稍后重试。")
