@@ -921,9 +921,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     songs = []
     search_start = time.time()
-    for attempt in range(1):  # 只尝试1次，总超时3秒，避免超过Telegram 10秒限制
+    for attempt in range(1):  # 只尝试1次，总超时2秒，避免超过Telegram 10秒限制
         try:
-            remaining = 3 - (time.time() - search_start)
+            remaining = 2 - (time.time() - search_start)
             if remaining <= 0:
                 break
             songs = await asyncio.wait_for(
@@ -969,7 +969,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id_map = {}
     try:
         file_id_tasks = [asyncio.to_thread(db.get_file_id, song["id"]) for song in valid_songs]
-        file_id_results = await asyncio.wait_for(asyncio.gather(*file_id_tasks), timeout=2)
+        file_id_results = await asyncio.wait_for(asyncio.gather(*file_id_tasks), timeout=1)
         file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
     except asyncio.TimeoutError:
         logger.warning("内联搜索 file_id查询超时，全部使用代理URL")
