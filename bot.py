@@ -191,7 +191,11 @@ async def audio_proxy_handler(request):
 
         # 下载音频（带Referer头，避免网易云CDN限制）
         headers = {"Referer": "https://music.163.com/"}
+        dl_start = time.time()
         resp = await asyncio.to_thread(requests.get, play_url, timeout=60, headers=headers)
+        dl_time = time.time() - dl_start
+        audio_size = len(resp.content) if resp.content else 0
+        logger.info(f"代理端点 song_id={sid} name='{name}' 下载状态={resp.status_code} 大小={audio_size}bytes 耗时={dl_time:.2f}s")
         if resp.status_code != 200:
             return web.Response(status=502, text="Failed to download audio")
         audio_bytes = io.BytesIO(resp.content)
@@ -204,6 +208,7 @@ async def audio_proxy_handler(request):
             if songs_detail:
                 cover_url = songs_detail[0].get("al", {}).get("picUrl", "")
                 cover_bytes, cover_mime = await asyncio.to_thread(_download_cover, cover_url)
+                logger.info(f"代理端点 song_id={sid} 封面{'成功' if cover_bytes else '失败/无'}")
         except Exception as ce:
             logger.warning(f"代理端点获取封面失败: {ce}")
 
@@ -679,11 +684,16 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     try:
         if edit:
             await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
+        dl_start = time.time()
         resp = requests_get(url, timeout=60)
+        dl_time = time.time() - dl_start
+        audio_size = len(resp.content) if resp.content else 0
+        logger.info(f"私聊下载 {song['name']} 状态={resp.status_code} 大小={audio_size}bytes 耗时={dl_time:.2f}s")
         audio_bytes = io.BytesIO(resp.content)
 
         # 下载封面并写入ID3标签（确保Telegram显示封面）
         cover_bytes, cover_mime = _download_cover(song.get("cover", ""))
+        logger.info(f"私聊封面 {song['name']} {'成功' if cover_bytes else '失败/无封面'}")
 
         # 写入ID3标签（含封面）
         audio_bytes = _tag_mp3(audio_bytes, song, cover_bytes=cover_bytes, cover_mime=cover_mime)
@@ -786,6 +796,7 @@ async def _cache_song_to_admin(context, song, url):
             fid = msg.audio.file_id
             # 保存缓存
             await asyncio.to_thread(db.set_file_id, song["id"], fid)
+            logger.info(f"内联缓存成功 song_id={song['id']} name='{song.get('name')}' file_id前20位={fid[:20]}")
 
             # 后台延迟删除管理员临时消息（延迟2秒确保消息完全处理）
             async def _del_temp():
@@ -1003,7 +1014,16 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         )
 
-    await query.answer(results, cache_time=0, is_personal=True)
+    cached_count = sum(1 for r in results if isinstance(r, InlineQueryResultCachedAudio))
+    proxy_count = sum(1 for r in results if isinstance(r, InlineQueryResultAudio))
+    total_time = time.time() - search_start
+    logger.info(f"内联搜索完成 关键词='{keyword}' 总耗时={total_time:.2f}s 缓存{cached_count}首 代理{proxy_count}首")
+
+    try:
+        await query.answer(results, cache_time=0, is_personal=True)
+        logger.info(f"内联搜索 answer成功 关键词='{keyword}'")
+    except Exception as e:
+        logger.error(f"内联搜索 answer失败 关键词='{keyword}': {e}")
 
 
 async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
