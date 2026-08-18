@@ -790,7 +790,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             if remaining <= 0:
                 break
             songs = await asyncio.wait_for(
-                asyncio.to_thread(api.search_songs_simple, keyword, config.INLINE_RESULTS_LIMIT),
+                asyncio.to_thread(api.search_songs_simple, keyword, 10),
                 timeout=remaining
             )
             if songs:
