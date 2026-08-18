@@ -126,6 +126,16 @@ async def audio_proxy_handler(request):
     音频代理端点：根据 song_id 从网易云下载MP3，写入ID3标签后返回。
     内联搜索通过此URL让 Telegram 直接拉取音频，无需先上传到管理员私聊。
     """
+    # HEAD请求快速响应（Telegram验证URL时用HEAD，不下载音频）
+    if request.method == "HEAD":
+        return web.Response(
+            status=200,
+            headers={
+                "Content-Type": "audio/mpeg",
+                "Accept-Ranges": "bytes",
+            },
+        )
+
     song_id = request.match_info.get("song_id")
     name = request.query.get("name", "未知歌曲")
     artist = request.query.get("artist", "未知艺术家")
