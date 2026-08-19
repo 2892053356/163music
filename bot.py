@@ -1062,28 +1062,50 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_label = f"{user.username or user.first_name or user.id}"
     logger.info(f"内联搜索 用户={user_label}(id={user.id}) 关键词='{keyword}'")
 
+    # 1. 关键词清洗：移除可能导致API问题的特殊字符（单引号、双引号、反斜杠等）
+    import re
+    clean_keyword = re.sub(r"['\"\\`]", "", keyword).strip()
+    if clean_keyword != keyword:
+        logger.info(f"内联搜索 关键词清洗: '{keyword}' -> '{clean_keyword}'")
+
+    # 2. 搜索函数：支持自定义关键词和超时
+    async def _do_search(kw: str, timeout_sec: float) -> list:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(api.search_songs_simple, kw, 8),
+                timeout=timeout_sec
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"内联搜索 超时 keyword='{kw}'")
+            return []
+        except Exception as e:
+            logger.warning(f"内联搜索 异常 keyword='{kw}' error={e}")
+            return []
+
     songs = []
     search_start = time.time()
-    for attempt in range(1):  # 只尝试1次，总超时2秒，避免查询过期
-        try:
-            remaining = 2 - (time.time() - search_start)
-            if remaining <= 0:
-                break
-            songs = await asyncio.wait_for(
-                asyncio.to_thread(api.search_songs_simple, keyword, 8),
-                timeout=remaining
-            )
-            if songs:
-                break
-        except asyncio.TimeoutError:
-            logger.warning(f"内联搜索 第{attempt+1}次超时")
-            break
-        except Exception as e:
-            logger.warning(f"内联搜索 第{attempt+1}次失败: {e}")
-            if attempt < 1:
-                await asyncio.sleep(0.5)
+
+    # 第一次搜索：清洗后的关键词，5秒超时
+    songs = await _do_search(clean_keyword, 5)
+
+    # 3. 降级搜索：如果第一次失败，尝试用前2个单词搜索
+    if not songs and len(clean_keyword.split()) > 2:
+        fallback_kw = " ".join(clean_keyword.split()[:2])
+        elapsed = time.time() - search_start
+        remaining = max(0.5, 5 - elapsed)
+        logger.info(f"内联搜索 降级搜索: '{clean_keyword}' -> '{fallback_kw}' (剩余{remaining:.1f}s)")
+        songs = await _do_search(fallback_kw, remaining)
+
+    # 如果清洗后的关键词搜索失败，再尝试原始关键词（可能特殊字符是歌名的一部分）
+    if not songs and clean_keyword != keyword:
+        elapsed = time.time() - search_start
+        remaining = max(0.5, 5 - elapsed)
+        if remaining > 1:
+            logger.info(f"内联搜索 尝试原始关键词: '{keyword}' (剩余{remaining:.1f}s)")
+            songs = await _do_search(keyword, remaining)
+
     if not songs:
-        logger.error("内联搜索失败（3次重试后）")
+        logger.error(f"内联搜索失败（多次尝试后）keyword='{keyword}'")
 
     # 调试日志：输出搜索关键词和返回结果
     song_names = [f"{s['name']}({s['artist']})" for s in songs[:5]]
