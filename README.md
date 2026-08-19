@@ -5,7 +5,8 @@
 [![Latest Release](https://img.shields.io/github/v/release/XiOuDi/163music?label=Latest%20Release&style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
 [![Releases](https://img.shields.io/badge/📦_查看所有版本-Releases-blue?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
 
-https://t.me/xioudi_A       https://t.me/xioudi163_bot
+作者  ：https://t.me/xioudi_A  
+Bot：https://t.me/xioudi163_bot
 
 > 🔗 **配套项目**：[cf-music-proxy](https://github.com/XiOuDi/cf-music-proxy) — Cloudflare Workers 音频代理（备用方案，需绑定自定义域名）
 
