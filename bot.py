@@ -149,51 +149,46 @@ async def audio_proxy_handler(request):
         return web.Response(status=400, text="Invalid song_id")
 
     try:
-        # 获取播放地址
-        url_result = api.get_song_url([sid], level=quality)
-        play_url = None
-        for item in url_result.get("data", []):
-            if item.get("id") == sid:
-                play_url = item.get("url")
-                break
-        if not play_url:
-            return web.Response(status=404, text="Song not available")
+        # 获取播放地址（3秒超时）
+        def _get_url(level):
+            url_result = api.get_song_url([sid], level=level)
+            for item in url_result.get("data", []):
+                if item.get("id") == sid and item.get("url"):
+                    return item["url"]
+            return None
 
-        # 下载音频：连接超时5秒快速失败，失败立即重试，双音质备用
+        # 下载音频：每种音质只试1次，连接超时5秒，双音质备用，总时间≤10秒
         audio_content = None
         for try_quality in [quality, "higher"]:
-            if try_quality != quality or not play_url:
-                url_result2 = api.get_song_url([sid], level=try_quality)
-                play_url = None
-                for item in url_result2.get("data", []):
-                    if item.get("id") == sid:
-                        play_url = item.get("url")
-                        break
-                if not play_url:
-                    continue
-            # 最多尝试2次（第一次5秒连接超时，失败后立即重试）
-            for attempt in range(2):
-                try:
-                    if play_url.startswith("http://"):
-                        play_url = "https://" + play_url[7:]
-                    # 连接超时5秒快速失败，读取超时30秒
-                    resp = _download_session.get(
-                        play_url,
-                        timeout=(5, 30),
+            try:
+                play_url = await asyncio.wait_for(
+                    asyncio.to_thread(_get_url, try_quality), timeout=3
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 获取地址超时")
+                continue
+            if not play_url:
+                continue
+            if play_url.startswith("http://"):
+                play_url = "https://" + play_url[7:]
+            try:
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _download_session.get, play_url,
+                        timeout=(5, 25),
                         headers={"Referer": "https://music.163.com/"}
-                    )
-                    if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
-                        audio_content = resp.content
-                        logger.info(f"代理端点 song_id={sid} 音质={try_quality} 尝试{attempt+1} 下载成功 大小={len(audio_content)}bytes")
-                        break
-                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 尝试{attempt+1} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
-                except Exception as e:
-                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 尝试{attempt+1} 异常: {type(e).__name__}: {e}")
-                    if attempt == 0:
-                        await asyncio.sleep(0.5)  # 短暂等待后重试
-                        continue
-            if audio_content:
-                break
+                    ),
+                    timeout=30
+                )
+                if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
+                    audio_content = resp.content
+                    logger.info(f"代理端点 song_id={sid} 音质={try_quality} 下载成功 大小={len(audio_content)}bytes")
+                    break
+                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
+            except asyncio.TimeoutError:
+                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载超时")
+            except Exception as e:
+                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 异常: {type(e).__name__}: {e}")
 
         if not audio_content:
             return web.Response(status=502, text="Audio download failed")
