@@ -2033,9 +2033,9 @@ def main():
                         success = 0
                         failed = 0
                         for idx, song in enumerate(to_cache, 1):
-                            # 有用户活动则暂停
-                            while time.time() - last_user_activity < 5:
-                                await asyncio.sleep(3)
+                            # 最低优先级：最近10秒有用户活动则暂停
+                            while time.time() - last_user_activity < 10:
+                                await asyncio.sleep(5)
                             # 再次检查开关
                             if not auto_cache_enabled:
                                 break
@@ -2044,10 +2044,12 @@ def main():
                                 url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
                                 if not url:
                                     failed += 1
+                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址")
                                     continue
                                 resp = await asyncio.to_thread(requests_get, url, 45)
                                 if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
                                     failed += 1
+                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 下载失败 status={resp.status_code} size={len(resp.content) if resp.content else 0}")
                                     continue
                                 audio_bytes = io.BytesIO(resp.content)
                                 audio_bytes = _tag_mp3(audio_bytes, song)
@@ -2064,6 +2066,7 @@ def main():
                                 if msg and msg.audio and msg.audio.file_id:
                                     db.set_file_id(song["id"], msg.audio.file_id)
                                     success += 1
+                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ✅ {song['name']} - {song['artist']} ({len(resp.content)//1024}KB)")
                                     # 延迟删除临时消息
                                     async def _del(mid):
                                         await asyncio.sleep(3)
@@ -2074,12 +2077,13 @@ def main():
                                     asyncio.create_task(_del(msg.message_id))
                                 else:
                                     failed += 1
+                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 上传无file_id")
                             except Exception as e:
                                 failed += 1
-                                logger.warning(f"闲时缓存失败 {song['name']}: {e}")
+                                logger.warning(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 异常: {e}")
 
-                            # 每首之间间隔1秒，避免过快
-                            await asyncio.sleep(1)
+                            # 最低优先级：每首之间间隔3秒，有用户活动时暂停更久
+                            await asyncio.sleep(3)
 
                         logger.info(f"闲时自动缓存完成：成功{success}首，失败{failed}首")
                     except Exception as e:
