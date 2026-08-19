@@ -1003,6 +1003,15 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if item.get("url"):
                     play_url_map[item["id"]] = item["url"]
             logger.info(f"内联搜索 获取播放地址: {len(play_url_map)}/{len(uncached_ids)}")
+            # 调试：验证第一个播放地址是否有效（HEAD请求，2秒超时）
+            if play_url_map:
+                first_id, first_url = next(iter(play_url_map.items()))
+                try:
+                    import requests as _req
+                    _head = _req.head(first_url, timeout=2, allow_redirects=True, headers={"Referer": "https://music.163.com/"})
+                    logger.info(f"内联搜索 播放地址验证 song_id={first_id} 状态={_head.status_code} 大小={_head.headers.get('Content-Length','?')} 域名={first_url.split('/')[2] if '//' in first_url else '?'}")
+                except Exception as _e:
+                    logger.info(f"内联搜索 播放地址验证失败 song_id={first_id} 错误={_e}")
         except Exception as e:
             logger.warning(f"内联搜索 获取播放地址失败: {e}")
 
