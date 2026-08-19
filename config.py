@@ -25,6 +25,10 @@ SEARCH_RESULTS_LIMIT = int(os.environ.get("SEARCH_RESULTS_LIMIT", "10"))
 # 代理（留空则直连，Render 不需要）
 PROXY_URL = os.environ.get("PROXY_URL", "")
 
+# Cloudflare Workers 代理（用于内联搜索音频代理，解决Render→网易云CDN不稳定）
+# 格式: https://your-worker.workers.dev （不要末尾斜杠）
+CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "https://cf-music-proxy.l2892053356.workers.dev")
+
 # Webhook 模式配置
 # Render 会自动设置 RENDER_EXTERNAL_URL 和 PORT
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", os.environ.get("RENDER_EXTERNAL_URL", ""))
