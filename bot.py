@@ -1072,11 +1072,16 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     chosen = update.chosen_inline_result
     if not chosen or not chosen.result_id:
         return
-    # 未缓存歌曲的result_id以 "url_" 开头
-    if not chosen.result_id.startswith("url_"):
+    # 未缓存歌曲的result_id以 "cf_" (CF代理) 或 "url_" (Render代理) 开头
+    rid = chosen.result_id
+    if rid.startswith("cf_"):
+        song_id_str = rid[3:]
+    elif rid.startswith("url_"):
+        song_id_str = rid[4:]
+    else:
         return
     try:
-        song_id = int(chosen.result_id[4:])
+        song_id = int(song_id_str)
     except ValueError:
         return
 
