@@ -2068,6 +2068,10 @@ def main():
                         all_songs = []
                         seen_ids = set()
                         for pl_id in AUTO_CACHE_PLAYLISTS:
+                            # 有用户活动则立即停止加载排行榜，优先处理用户请求
+                            if time.time() - last_user_activity < 10:
+                                logger.info(f"闲时缓存：检测到用户活动，停止加载排行榜（已加载{len(all_songs)}首）")
+                                break
                             try:
                                 songs = await asyncio.to_thread(api.get_toplist_songs, pl_id, 100)
                                 if songs:
