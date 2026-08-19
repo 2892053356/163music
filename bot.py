@@ -2202,10 +2202,12 @@ def main():
                         logger.warning("闲时自动缓存：❌ 获取歌单失败，无歌曲可缓存")
                         return
 
-                    # 过滤已缓存的
-                    _cached_count = sum(1 for s in all_songs if db.get_file_id(s["id"]))
-                    to_cache = [s for s in all_songs if not db.get_file_id(s["id"])]
-                    logger.info(f"闲时缓存：歌单共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首")
+                    # 批量查询已缓存的file_id（1次Redis请求，避免逐个查询的延迟）
+                    _all_ids = [s["id"] for s in all_songs]
+                    _cached_map = db.get_file_ids_batch(_all_ids) if db.enabled else {}
+                    _cached_count = sum(1 for sid in _all_ids if _cached_map.get(sid))
+                    to_cache = [s for s in all_songs if not _cached_map.get(s["id"])]
+                    logger.info(f"闲时缓存：歌单共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首（批量查询耗时极短）")
                     if not to_cache:
                         logger.info("闲时自动缓存：✅ 今日歌单已全部缓存，无需处理")
                         return
