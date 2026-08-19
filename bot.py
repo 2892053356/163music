@@ -2125,7 +2125,7 @@ def main():
 
             # 闲时自动缓存核心逻辑（可被闲时检测或立即缓存按钮调用）
             async def _do_auto_cache():
-                global auto_cache_running
+                global auto_cache_running, _manual_cache_mode
                 if auto_cache_running:
                     return
                 auto_cache_running = True
@@ -2259,7 +2259,6 @@ def main():
                     logger.error(f"闲时自动缓存异常: {e}")
                 finally:
                     auto_cache_running = False
-                    global _manual_cache_mode
                     if _manual_cache_mode:
                         _manual_cache_mode = False
                         logger.info("闲时缓存：手动模式结束，恢复优先级检测")
