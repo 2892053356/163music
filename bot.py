@@ -68,6 +68,17 @@ inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
 auto_cache_running = False  # 是否正在执行自动缓存
 auto_cache_enabled = True   # 自动缓存开关
 AUTO_CACHE_IDLE_THRESHOLD = 300  # 闲时阈值：5分钟无用户活动视为空闲
+# 闲时缓存的排行榜列表（多个榜单合集，覆盖更多歌曲）
+AUTO_CACHE_PLAYLISTS = [
+    3778678,   # 热歌榜
+    3779629,   # 新歌榜
+    19723756,  # 飙升榜
+    2884035,   # 原创榜
+    71385702,  # 网络歌曲榜
+    71384707,  # 电子榜
+    71385487,  # 说唱榜
+    112504,    # 华语金曲榜
+]
 
 # ============================================================
 # 数据存储（Upstash Redis 持久化）
@@ -1654,7 +1665,7 @@ async def cmd_autocache(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     auto_cache_enabled = not auto_cache_enabled
     status = "✅ 已开启" if auto_cache_enabled else "❌ 已关闭"
-    await update.message.reply_text(f"♻️ 闲时自动缓存{status}\n\n空闲5分钟无用户活动时自动缓存热歌榜前100首，有用户请求时立即暂停。")
+    await update.message.reply_text(f"♻️ 闲时自动缓存{status}\n\n空闲5分钟无用户活动时自动缓存多榜单曲库（{len(AUTO_CACHE_PLAYLISTS)}个排行榜），有用户请求时立即暂停。")
 
 
 async def cmd_cachestatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1676,6 +1687,7 @@ async def cmd_cachestatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 缓存状态\n\n"
         f"♻️ 自动缓存：{enabled}\n"
         f"🔄 当前状态：{running}\n"
+        f"📚 曲库榜单：{len(AUTO_CACHE_PLAYLISTS)} 个\n"
         f"💾 已缓存歌曲：{cached_count} 首\n"
         f"⏱️ 距上次用户活动：{idle_time}秒\n"
         f"📋 闲时阈值：{AUTO_CACHE_IDLE_THRESHOLD}秒（5分钟）"
@@ -1990,21 +2002,34 @@ def main():
                         continue
 
                     auto_cache_running = True
-                    logger.info("闲时自动缓存：检测到空闲，开始缓存热歌榜")
+                    logger.info("闲时自动缓存：检测到空闲，开始缓存多榜单曲库")
                     try:
-                        # 获取热歌榜前100首
-                        songs = await asyncio.to_thread(api.get_toplist_songs, 3778678, 100)
-                        if not songs:
-                            logger.warning("闲时自动缓存：获取热歌榜失败")
+                        # 从多个排行榜获取歌曲合集
+                        all_songs = []
+                        seen_ids = set()
+                        for pl_id in AUTO_CACHE_PLAYLISTS:
+                            try:
+                                songs = await asyncio.to_thread(api.get_toplist_songs, pl_id, 100)
+                                if songs:
+                                    for s in songs:
+                                        if s["id"] not in seen_ids:
+                                            seen_ids.add(s["id"])
+                                            all_songs.append(s)
+                                await asyncio.sleep(0.5)  # 避免请求过快
+                            except Exception as e:
+                                logger.warning(f"闲时缓存 获取排行榜{pl_id}失败: {e}")
+
+                        if not all_songs:
+                            logger.warning("闲时自动缓存：获取曲库失败")
                             continue
 
                         # 过滤已缓存的
-                        to_cache = [s for s in songs if not db.get_file_id(s["id"])]
+                        to_cache = [s for s in all_songs if not db.get_file_id(s["id"])]
                         if not to_cache:
-                            logger.info("闲时自动缓存：热歌榜已全部缓存，无需处理")
+                            logger.info(f"闲时自动缓存：曲库共{len(all_songs)}首已全部缓存")
                             continue
 
-                        logger.info(f"闲时自动缓存：热歌榜{len(songs)}首，待缓存{len(to_cache)}首")
+                        logger.info(f"闲时自动缓存：曲库共{len(all_songs)}首（去重），待缓存{len(to_cache)}首")
                         success = 0
                         failed = 0
                         for idx, song in enumerate(to_cache, 1):
