@@ -69,6 +69,7 @@ _processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
 # 闲时自动缓存状态
 auto_cache_running = False  # 是否正在执行自动缓存
 auto_cache_enabled = True   # 自动缓存开关
+_do_auto_cache_func = None  # 立即缓存函数引用（在run_server中赋值）
 AUTO_CACHE_IDLE_THRESHOLD = 300  # 闲时阈值：5分钟无用户活动视为空闲
 # 闲时缓存的排行榜列表（多个榜单合集，覆盖更多歌曲）
 # 主榜单（优先缓存）
@@ -665,6 +666,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📀 <b>歌单</b>（共{len(songs)}首）\n\n请选择播放方式：",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML",
+        )
+    elif data == "cache_now":
+        # 管理员立即缓存
+        if not _is_admin(user.id):
+            await query.answer("⛔ 权限不足", show_alert=True)
+            return
+        if auto_cache_running:
+            await query.answer("🔄 正在缓存中，请稍候...", show_alert=True)
+            return
+        if _do_auto_cache_func:
+            asyncio.create_task(_do_auto_cache_func())
+            await query.answer("⚡ 立即缓存已启动！", show_alert=True)
+            await query.edit_message_text("⚡ 立即缓存已启动！\n\n正在缓存多榜单曲库，有用户活动时自动暂停。")
+        else:
+            await query.answer("⚠️ 缓存功能未就绪", show_alert=True)
+    elif data == "cache_status_refresh":
+        # 刷新缓存状态
+        if not _is_admin(user.id):
+            await query.answer("⛔ 权限不足", show_alert=True)
+            return
+        try:
+            keys = db._exec("KEYS", "cache:file_id:*")
+            cached_count = len(keys) if keys else 0
+        except Exception:
+            cached_count = "未知"
+        idle_time = int(time.time() - last_user_activity) if last_user_activity else "从未"
+        running = "🔄 正在缓存中" if auto_cache_running else "⏸️ 未在缓存"
+        enabled = "✅ 已开启" if auto_cache_enabled else "❌ 已关闭"
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚡ 立即缓存", callback_data="cache_now"),
+            InlineKeyboardButton("🔄 刷新状态", callback_data="cache_status_refresh"),
+        ]])
+        await query.edit_message_text(
+            f"📊 缓存状态\n\n"
+            f"♻️ 自动缓存：{enabled}\n"
+            f"🔄 当前状态：{running}\n"
+            f"📚 曲库榜单：{len(AUTO_CACHE_PLAYLISTS)} 个\n"
+            f"💾 已缓存歌曲：{cached_count} 首\n"
+            f"⏱️ 距上次用户活动：{idle_time}秒\n"
+            f"📋 闲时阈值：{AUTO_CACHE_IDLE_THRESHOLD}秒（5分钟）",
+            reply_markup=keyboard,
         )
 
 
@@ -1745,6 +1787,12 @@ async def cmd_cachestatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idle_time = int(time.time() - last_user_activity) if last_user_activity else "从未"
     running = "🔄 正在缓存中" if auto_cache_running else "⏸️ 未在缓存"
     enabled = "✅ 已开启" if auto_cache_enabled else "❌ 已关闭"
+    # 立即缓存按钮
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚡ 立即缓存", callback_data="cache_now"),
+        InlineKeyboardButton("🔄 刷新状态", callback_data="cache_status_refresh"),
+    ]])
     await update.message.reply_text(
         f"📊 缓存状态\n\n"
         f"♻️ 自动缓存：{enabled}\n"
@@ -1752,7 +1800,8 @@ async def cmd_cachestatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📚 曲库榜单：{len(AUTO_CACHE_PLAYLISTS)} 个\n"
         f"💾 已缓存歌曲：{cached_count} 首\n"
         f"⏱️ 距上次用户活动：{idle_time}秒\n"
-        f"📋 闲时阈值：{AUTO_CACHE_IDLE_THRESHOLD}秒（5分钟）"
+        f"📋 闲时阈值：{AUTO_CACHE_IDLE_THRESHOLD}秒（5分钟）",
+        reply_markup=keyboard,
     )
 
 
@@ -2058,165 +2107,173 @@ def main():
 
             asyncio.create_task(_auto_restart())
 
-            # 闲时自动缓存热歌榜（最低优先级，有用户活动时暂停）
-            async def _idle_auto_cache():
+            # 闲时自动缓存核心逻辑（可被闲时检测或立即缓存按钮调用）
+            async def _do_auto_cache():
                 global auto_cache_running
+                if auto_cache_running:
+                    return
+                auto_cache_running = True
+                _cache_start = time.time()
+                logger.info(f"闲时自动缓存：检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存多榜单曲库（共{len(AUTO_CACHE_PLAYLISTS)}个排行榜）")
+                try:
+                    # 优先从Redis读取已缓存的曲库列表（24小时过期）
+                    all_songs = []
+                    _redis_hit = False
+                    if db.enabled:
+                        cached_list = db._exec("GET", "auto_cache:song_list")
+                        if cached_list:
+                            try:
+                                all_songs = json.loads(cached_list)
+                                _redis_hit = True
+                                logger.info(f"闲时缓存：✅ Redis命中，读取曲库{len(all_songs)}首（跳过API调用）")
+                            except Exception as e:
+                                logger.warning(f"闲时缓存：Redis数据解析失败，重新获取: {e}")
+                                all_songs = []
+                        else:
+                            logger.info("闲时缓存：Redis未命中，将从API获取排行榜")
+
+                    if not all_songs:
+                        # Redis无缓存，从多个排行榜获取歌曲合集
+                        seen_ids = set()
+                        _pl_loaded = 0
+                        for pl_idx, pl_id in enumerate(AUTO_CACHE_PLAYLISTS, 1):
+                            # 有用户活动则立即停止加载排行榜，优先处理用户请求
+                            if time.time() - last_user_activity < 10:
+                                logger.info(f"闲时缓存：⚠️ 检测到用户活动，停止加载排行榜（已加载{_pl_loaded}/{len(AUTO_CACHE_PLAYLISTS)}个，共{len(all_songs)}首）")
+                                break
+                            try:
+                                _pl_start = time.time()
+                                songs = await asyncio.to_thread(api.get_toplist_songs, pl_id, 100)
+                                _pl_time = time.time() - _pl_start
+                                if songs:
+                                    _new = 0
+                                    for s in songs:
+                                        if s["id"] not in seen_ids:
+                                            seen_ids.add(s["id"])
+                                            all_songs.append(s)
+                                            _new += 1
+                                    _pl_loaded += 1
+                                    logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
+                                else:
+                                    logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 返回空")
+                                await asyncio.sleep(0.5)  # 避免请求过快
+                            except Exception as e:
+                                logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 获取失败: {e}")
+
+                        # 加载完成或被打断后，将曲库存入Redis（24小时过期）
+                        if all_songs and db.enabled:
+                            try:
+                                db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", 86400)
+                                logger.info(f"闲时缓存：💾 曲库{len(all_songs)}首已存入Redis（24小时过期）")
+                            except Exception as e:
+                                logger.warning(f"闲时缓存：存入Redis失败: {e}")
+
+                    if not all_songs:
+                        logger.warning("闲时自动缓存：❌ 获取曲库失败，无歌曲可缓存")
+                        continue
+
+                    # 过滤已缓存的
+                    _cached_count = sum(1 for s in all_songs if db.get_file_id(s["id"]))
+                    to_cache = [s for s in all_songs if not db.get_file_id(s["id"])]
+                    logger.info(f"闲时缓存：曲库共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首")
+                    if not to_cache:
+                        logger.info("闲时自动缓存：✅ 曲库已全部缓存，无需处理")
+                        continue
+
+                    success = 0
+                    failed = 0
+                    _paused_count = 0
+                    for idx, song in enumerate(to_cache, 1):
+                        # 最低优先级：最近10秒有用户活动则暂停
+                        _paused = False
+                        while time.time() - last_user_activity < 10:
+                            if not _paused:
+                                logger.info(f"闲时缓存：⏸️ 检测到用户活动，暂停缓存（当前{idx}/{len(to_cache)}）")
+                                _paused = True
+                                _paused_count += 1
+                            await asyncio.sleep(5)
+                        if _paused:
+                            logger.info(f"闲时缓存：▶️ 用户活动结束，恢复缓存")
+                        # 再次检查开关
+                        if not auto_cache_enabled:
+                            logger.info("闲时缓存：🔕 自动缓存已关闭，停止")
+                            break
+
+                        try:
+                            url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
+                            if not url:
+                                failed += 1
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址")
+                                continue
+                            resp = await asyncio.to_thread(requests_get, url, 45)
+                            if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                                failed += 1
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 下载失败 status={resp.status_code} size={len(resp.content) if resp.content else 0}")
+                                continue
+                            audio_bytes = io.BytesIO(resp.content)
+                            # _tag_mp3含同步封面下载，放入线程池避免阻塞事件循环
+                            audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
+                            filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+                            msg = await application.bot.send_audio(
+                                chat_id=8684066933,  # 内联缓存专用管理员
+                                audio=audio_bytes,
+                                filename=filename,
+                                title=song["name"],
+                                performer=song["artist"],
+                                caption=f"♻️ 闲时缓存 {idx}/{len(to_cache)}",
+                                duration=song["duration"] // 1000 if song.get("duration") else None,
+                            )
+                            if msg and msg.audio and msg.audio.file_id:
+                                db.set_file_id(song["id"], msg.audio.file_id)
+                                success += 1
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ✅ {song['name']} - {song['artist']} ({len(resp.content)//1024}KB)")
+                                # 实时从Redis曲库中移除已缓存歌曲
+                                if db.enabled and all_songs:
+                                    try:
+                                        all_songs = [s for s in all_songs if s["id"] != song["id"]]
+                                        db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", 86400)
+                                    except Exception as e:
+                                        logger.warning(f"闲时缓存：更新Redis曲库失败: {e}")
+                                # 延迟删除临时消息
+                                async def _del(mid):
+                                    await asyncio.sleep(3)
+                                    try:
+                                        await application.bot.delete_message(chat_id=8684066933, message_id=mid)
+                                    except Exception:
+                                        pass
+                                asyncio.create_task(_del(msg.message_id))
+                            else:
+                                failed += 1
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 上传无file_id")
+                        except Exception as e:
+                            failed += 1
+                            logger.warning(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 异常: {e}")
+
+                        # 最低优先级：每首之间间隔3秒，有用户活动时暂停更久
+                        await asyncio.sleep(3)
+
+                    _total_time = time.time() - _cache_start
+                    logger.info(f"闲时自动缓存完成：✅ 成功{success}首，❌ 失败{failed}首，⏸️ 暂停{_paused_count}次，总耗时{_total_time:.1f}s")
+                except Exception as e:
+                    logger.error(f"闲时自动缓存异常: {e}")
+                finally:
+                    auto_cache_running = False
+
+            # 闲时自动缓存循环：每分钟检测是否空闲，空闲则调用_do_auto_cache
+            async def _idle_auto_cache():
                 while True:
-                    await asyncio.sleep(60)  # 每分钟检查一次
+                    await asyncio.sleep(60)
                     if not auto_cache_enabled:
                         continue
                     if auto_cache_running:
                         continue
-                    # 检查是否空闲（5分钟无用户活动）
                     if time.time() - last_user_activity < AUTO_CACHE_IDLE_THRESHOLD:
                         continue
+                    asyncio.create_task(_do_auto_cache())
 
-                    auto_cache_running = True
-                    _cache_start = time.time()
-                    logger.info(f"闲时自动缓存：检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存多榜单曲库（共{len(AUTO_CACHE_PLAYLISTS)}个排行榜）")
-                    try:
-                        # 优先从Redis读取已缓存的曲库列表（24小时过期）
-                        all_songs = []
-                        _redis_hit = False
-                        if db.enabled:
-                            cached_list = db._exec("GET", "auto_cache:song_list")
-                            if cached_list:
-                                try:
-                                    all_songs = json.loads(cached_list)
-                                    _redis_hit = True
-                                    logger.info(f"闲时缓存：✅ Redis命中，读取曲库{len(all_songs)}首（跳过API调用）")
-                                except Exception as e:
-                                    logger.warning(f"闲时缓存：Redis数据解析失败，重新获取: {e}")
-                                    all_songs = []
-                            else:
-                                logger.info("闲时缓存：Redis未命中，将从API获取排行榜")
-
-                        if not all_songs:
-                            # Redis无缓存，从多个排行榜获取歌曲合集
-                            seen_ids = set()
-                            _pl_loaded = 0
-                            for pl_idx, pl_id in enumerate(AUTO_CACHE_PLAYLISTS, 1):
-                                # 有用户活动则立即停止加载排行榜，优先处理用户请求
-                                if time.time() - last_user_activity < 10:
-                                    logger.info(f"闲时缓存：⚠️ 检测到用户活动，停止加载排行榜（已加载{_pl_loaded}/{len(AUTO_CACHE_PLAYLISTS)}个，共{len(all_songs)}首）")
-                                    break
-                                try:
-                                    _pl_start = time.time()
-                                    songs = await asyncio.to_thread(api.get_toplist_songs, pl_id, 100)
-                                    _pl_time = time.time() - _pl_start
-                                    if songs:
-                                        _new = 0
-                                        for s in songs:
-                                            if s["id"] not in seen_ids:
-                                                seen_ids.add(s["id"])
-                                                all_songs.append(s)
-                                                _new += 1
-                                        _pl_loaded += 1
-                                        logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
-                                    else:
-                                        logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 返回空")
-                                    await asyncio.sleep(0.5)  # 避免请求过快
-                                except Exception as e:
-                                    logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 获取失败: {e}")
-
-                            # 加载完成或被打断后，将曲库存入Redis（24小时过期）
-                            if all_songs and db.enabled:
-                                try:
-                                    db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", 86400)
-                                    logger.info(f"闲时缓存：💾 曲库{len(all_songs)}首已存入Redis（24小时过期）")
-                                except Exception as e:
-                                    logger.warning(f"闲时缓存：存入Redis失败: {e}")
-
-                        if not all_songs:
-                            logger.warning("闲时自动缓存：❌ 获取曲库失败，无歌曲可缓存")
-                            continue
-
-                        # 过滤已缓存的
-                        _cached_count = sum(1 for s in all_songs if db.get_file_id(s["id"]))
-                        to_cache = [s for s in all_songs if not db.get_file_id(s["id"])]
-                        logger.info(f"闲时缓存：曲库共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首")
-                        if not to_cache:
-                            logger.info("闲时自动缓存：✅ 曲库已全部缓存，无需处理")
-                            continue
-
-                        success = 0
-                        failed = 0
-                        _paused_count = 0
-                        for idx, song in enumerate(to_cache, 1):
-                            # 最低优先级：最近10秒有用户活动则暂停
-                            _paused = False
-                            while time.time() - last_user_activity < 10:
-                                if not _paused:
-                                    logger.info(f"闲时缓存：⏸️ 检测到用户活动，暂停缓存（当前{idx}/{len(to_cache)}）")
-                                    _paused = True
-                                    _paused_count += 1
-                                await asyncio.sleep(5)
-                            if _paused:
-                                logger.info(f"闲时缓存：▶️ 用户活动结束，恢复缓存")
-                            # 再次检查开关
-                            if not auto_cache_enabled:
-                                logger.info("闲时缓存：🔕 自动缓存已关闭，停止")
-                                break
-
-                            try:
-                                url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
-                                if not url:
-                                    failed += 1
-                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址")
-                                    continue
-                                resp = await asyncio.to_thread(requests_get, url, 45)
-                                if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                                    failed += 1
-                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 下载失败 status={resp.status_code} size={len(resp.content) if resp.content else 0}")
-                                    continue
-                                audio_bytes = io.BytesIO(resp.content)
-                                # _tag_mp3含同步封面下载，放入线程池避免阻塞事件循环
-                                audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
-                                filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-                                msg = await application.bot.send_audio(
-                                    chat_id=8684066933,  # 内联缓存专用管理员
-                                    audio=audio_bytes,
-                                    filename=filename,
-                                    title=song["name"],
-                                    performer=song["artist"],
-                                    caption=f"♻️ 闲时缓存 {idx}/{len(to_cache)}",
-                                    duration=song["duration"] // 1000 if song.get("duration") else None,
-                                )
-                                if msg and msg.audio and msg.audio.file_id:
-                                    db.set_file_id(song["id"], msg.audio.file_id)
-                                    success += 1
-                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ✅ {song['name']} - {song['artist']} ({len(resp.content)//1024}KB)")
-                                    # 实时从Redis曲库中移除已缓存歌曲
-                                    if db.enabled and all_songs:
-                                        try:
-                                            all_songs = [s for s in all_songs if s["id"] != song["id"]]
-                                            db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", 86400)
-                                        except Exception as e:
-                                            logger.warning(f"闲时缓存：更新Redis曲库失败: {e}")
-                                    # 延迟删除临时消息
-                                    async def _del(mid):
-                                        await asyncio.sleep(3)
-                                        try:
-                                            await application.bot.delete_message(chat_id=8684066933, message_id=mid)
-                                        except Exception:
-                                            pass
-                                    asyncio.create_task(_del(msg.message_id))
-                                else:
-                                    failed += 1
-                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 上传无file_id")
-                            except Exception as e:
-                                failed += 1
-                                logger.warning(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 异常: {e}")
-
-                            # 最低优先级：每首之间间隔3秒，有用户活动时暂停更久
-                            await asyncio.sleep(3)
-
-                        _total_time = time.time() - _cache_start
-                        logger.info(f"闲时自动缓存完成：✅ 成功{success}首，❌ 失败{failed}首，⏸️ 暂停{_paused_count}次，总耗时{_total_time:.1f}s")
-                    except Exception as e:
-                        logger.error(f"闲时自动缓存异常: {e}")
-                    finally:
-                        auto_cache_running = False
+            # 保存引用，供管理员"立即缓存"按钮调用
+            global _do_auto_cache_func
+            _do_auto_cache_func = _do_auto_cache
 
             asyncio.create_task(_idle_auto_cache())
 
