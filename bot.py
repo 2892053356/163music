@@ -2186,7 +2186,7 @@ def main():
 
                     if not all_songs:
                         logger.warning("闲时自动缓存：❌ 获取曲库失败，无歌曲可缓存")
-                        continue
+                        return
 
                     # 过滤已缓存的
                     _cached_count = sum(1 for s in all_songs if db.get_file_id(s["id"]))
@@ -2194,7 +2194,7 @@ def main():
                     logger.info(f"闲时缓存：曲库共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首")
                     if not to_cache:
                         logger.info("闲时自动缓存：✅ 曲库已全部缓存，无需处理")
-                        continue
+                        return
 
                     success = 0
                     failed = 0
