@@ -104,6 +104,19 @@ AUTO_CACHE_EXTENDED_PLAYLISTS = [
 ]
 AUTO_CACHE_PLAYLISTS = AUTO_CACHE_PRIMARY_PLAYLISTS + AUTO_CACHE_EXTENDED_PLAYLISTS
 
+# 排行榜ID到名称的映射（用于日志显示）
+PLAYLIST_NAMES = {
+    3778678: "热歌榜", 3779629: "新歌榜", 19723756: "飙升榜", 2884035: "原创榜",
+    71385702: "网络歌曲榜", 71384707: "电子榜", 71385487: "说唱榜", 112504: "华语金曲榜",
+    60198: "美国Billboard榜", 60131: "日本Oricon榜", 11641012: "英国Q杂志榜",
+    180106: "韩国Mnet榜", 71380410: "民谣榜", 71380409: "摇滚榜", 71380408: "流行榜",
+    71380407: "轻音乐榜", 71380406: "爵士榜", 71380405: "R&B榜", 71380404: "乡村榜",
+    3812895: "古典音乐榜", 27135204: "台湾KKBOX榜", 112463: "香港电台榜",
+    71380403: "蓝调榜", 71380402: "雷鬼榜",
+}
+# 曲库Redis缓存过期时间：7天（每周更新一次）
+AUTO_CACHE_REDIS_EXPIRE = 604800
+
 # ============================================================
 # 数据存储（Upstash Redis 持久化）
 # ============================================================
@@ -2116,7 +2129,7 @@ def main():
                 _cache_start = time.time()
                 logger.info(f"闲时自动缓存：检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存多榜单曲库（共{len(AUTO_CACHE_PLAYLISTS)}个排行榜）")
                 try:
-                    # 优先从Redis读取已缓存的曲库列表（24小时过期）
+                    # 优先从Redis读取已缓存的曲库列表（7天过期，每周更新）
                     all_songs = []
                     _redis_hit = False
                     if db.enabled:
@@ -2153,18 +2166,21 @@ def main():
                                             all_songs.append(s)
                                             _new += 1
                                     _pl_loaded += 1
-                                    logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
+                                    _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
+                                    logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] {_pl_name}(ID={pl_id}) 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
                                 else:
-                                    logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 返回空")
+                                    _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
+                                    logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] {_pl_name}(ID={pl_id}) 返回空")
                                 await asyncio.sleep(0.5)  # 避免请求过快
                             except Exception as e:
-                                logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] ID={pl_id} 获取失败: {e}")
+                                _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
+                                logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] {_pl_name}(ID={pl_id}) 获取失败: {e}")
 
-                        # 加载完成或被打断后，将曲库存入Redis（24小时过期）
+                        # 加载完成或被打断后，将曲库存入Redis（7天过期，每周更新）
                         if all_songs and db.enabled:
                             try:
-                                db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", 86400)
-                                logger.info(f"闲时缓存：💾 曲库{len(all_songs)}首已存入Redis（24小时过期）")
+                                db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", AUTO_CACHE_REDIS_EXPIRE)
+                                logger.info(f"闲时缓存：📊 曲库加载完成：{_pl_loaded}/{len(AUTO_CACHE_PLAYLISTS)}个排行榜，去重后共{len(all_songs)}首，已存入Redis（7天过期）")
                             except Exception as e:
                                 logger.warning(f"闲时缓存：存入Redis失败: {e}")
 
@@ -2231,7 +2247,7 @@ def main():
                                 if db.enabled and all_songs:
                                     try:
                                         all_songs = [s for s in all_songs if s["id"] != song["id"]]
-                                        db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", 86400)
+                                        db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", AUTO_CACHE_REDIS_EXPIRE)
                                     except Exception as e:
                                         logger.warning(f"闲时缓存：更新Redis曲库失败: {e}")
                                 # 延迟删除临时消息
