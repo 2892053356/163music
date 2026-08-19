@@ -2232,20 +2232,29 @@ def main():
                             break
 
                         try:
+                            _song_start = time.time()
+                            logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🎵 开始处理《{song['name']}》- {song['artist']}")
                             url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
                             if not url:
                                 failed += 1
                                 logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址")
                                 continue
+                            _dl_start = time.time()
                             resp = await asyncio.to_thread(requests_get, url, 45)
+                            _dl_time = time.time() - _dl_start
                             if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
                                 failed += 1
                                 logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 下载失败 status={resp.status_code} size={len(resp.content) if resp.content else 0}")
                                 continue
+                            logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ⬇️ 下载完成 {song['name']} ({len(resp.content)//1024}KB, {_dl_time:.1f}s)")
                             audio_bytes = io.BytesIO(resp.content)
                             # _tag_mp3含同步封面下载，放入线程池避免阻塞事件循环
+                            _tag_start = time.time()
                             audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
+                            _tag_time = time.time() - _tag_start
+                            logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🏷️ ID3标签完成 {song['name']} ({_tag_time:.1f}s)")
                             filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+                            _up_start = time.time()
                             msg = await application.bot.send_audio(
                                 chat_id=8684066933,  # 内联缓存专用管理员
                                 audio=audio_bytes,
@@ -2255,10 +2264,12 @@ def main():
                                 caption=f"♻️ 闲时缓存 {idx}/{len(to_cache)}",
                                 duration=song["duration"] // 1000 if song.get("duration") else None,
                             )
+                            _up_time = time.time() - _up_start
                             if msg and msg.audio and msg.audio.file_id:
                                 db.set_file_id(song["id"], msg.audio.file_id)
                                 success += 1
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ✅ {song['name']} - {song['artist']} ({len(resp.content)//1024}KB)")
+                                _total_time = time.time() - _song_start
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ✅ {song['name']} - {song['artist']} ({len(resp.content)//1024}KB, 上传{_up_time:.1f}s, 总耗时{_total_time:.1f}s)")
                                 # 延迟删除临时消息
                                 async def _del(mid):
                                     await asyncio.sleep(3)
