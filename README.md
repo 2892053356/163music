@@ -2,8 +2,10 @@
 
 支持搜索、播放网易云音乐的 Telegram 机器人，带内联搜索、歌单播放和管理员功能。
 
-[![Latest Release](https://img.shields.io/github/v/release/2892053356/163music?label=Latest%20Release&style=for-the-badge)](https://github.com/2892053356/163music/releases)
-[![Releases](https://img.shields.io/badge/📦_查看所有版本-Releases-blue?style=for-the-badge)](https://github.com/2892053356/163music/releases)
+[![Latest Release](https://img.shields.io/github/v/release/XiOuDi/163music?label=Latest%20Release&style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
+[![Releases](https://img.shields.io/badge/📦_查看所有版本-Releases-blue?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
+
+> 🔗 **配套项目**：[cf-music-proxy](https://github.com/XiOuDi/cf-music-proxy) — Cloudflare Workers 音频代理（备用方案，需绑定自定义域名）
 
 ## ✨ 功能
 
@@ -11,10 +13,11 @@
 - `/music 歌曲名` — 搜索并播放歌曲，带歌词按钮
 - `/playlist 歌单ID/链接` — 播放网易云歌单（列表选择 / 全部播放）
 - 内联搜索：`@机器人用户名 歌曲名` — 任意对话中直接分享音频
-- 音频带 ID3 标签（正确显示标题/艺术家），MP3 格式
+- 音频带 ID3 标签（正确显示标题/艺术家/专辑），MP3 格式
 
 ### 缓存与性能
 - Telegram file_id 缓存：播放过的歌曲秒发，零带宽
+- MGET 批量查询缓存，减少 Redis 网络往返
 - 排行榜预热：`/cachetop` 后台缓存热歌榜前100首
 - 三级任务优先级：用户单曲 > 歌单播放 > 缓存预热
 
@@ -24,6 +27,8 @@
 - 自定义欢迎语（`/setwelcome`、`/viewwelcome`、`/resetwelcome`）
 - Cookie 管理（`/cookie`、`/refreshcookie`、`/setcookie`，上传.txt自动识别）
 - 用户列表（`/users`，点击ID访问主页）
+- 管理员添加/移除（`/addadmin`、`/deladmin`）
+- 清除缓存（`/clearcache`）
 - 手动重启（`/restart`）+ 每4小时自动重启
 
 ## 🚀 Render 部署（Webhook 模式）
@@ -58,9 +63,9 @@
 | `NETEASE_COOKIE` | ✅ | 网易云 MUSIC_U cookie 值 |
 | `ADMIN_ID` | ✅ | 管理员用户数字 ID |
 | `MUSIC_QUALITY` | ❌ | 音质，默认 `standard` |
-| `INLINE_RESULTS_LIMIT` | ❌ | 内联搜索结果数，默认 25 |
+| `INLINE_RESULTS_LIMIT` | ❌ | 内联搜索结果数，默认 12 |
 | `DEFAULT_WELCOME` | ❌ | 默认欢迎语，支持 `{username}` 变量 |
-| `PROXY_URL` | ❌ | 代理地址，Render 不需要 |
+| `CF_PROXY_URL` | ❌ | Cloudflare Workers 代理地址（备用方案，需绑定自定义域名，见下方说明） |
 | `UPSTASH_REDIS_REST_URL` | ✅ | Upstash Redis REST URL |
 | `UPSTASH_REDIS_REST_TOKEN` | ✅ | Upstash Redis REST Token |
 
@@ -72,6 +77,19 @@
 4. 填入 Render 环境变量或本地 `.env`
 
 Upstash 免费版：每日 10000 次命令，256MB 存储，足够个人使用。
+
+### 内联搜索音频代理说明
+
+内联搜索未缓存的歌曲需要提供音频 URL 给 Telegram 下载。当前默认使用 **Render 自带代理端点**（`/audio/{song_id}`），Telegram 可稳定访问 `onrender.com` 域名。
+
+**Cloudflare Workers 代理（可选备用）**：
+
+由于 Telegram 服务器端对 `workers.dev` 域名存在访问限制（`webpage curl failed`），CF 代理默认不启用。如需使用：
+
+1. 部署 [cf-music-proxy](https://github.com/XiOuDi/cf-music-proxy)
+2. **必须绑定自定义域名**（如 `proxy.yourdomain.com`），不能直接用 `workers.dev`
+3. 在 Render 环境变量中设置 `CF_PROXY_URL=https://proxy.yourdomain.com`
+4. 修改 bot.py 内联搜索逻辑启用 CF 代理
 
 ## ⚙️ BotFather 设置
 
@@ -93,4 +111,5 @@ Upstash 免费版：每日 10000 次命令，256MB 存储，足够个人使用�
 - Render 免费 Web Service 15分钟无请求会休眠，webhook 消息会自动唤醒实例（首次响应可能有几秒延迟）
 - 数据持久化到 Upstash Redis，重启不丢失
 - 网易云 cookie 会过期，管理员可通过 `/refreshcookie` 或 `/setcookie` 更新
-- 内联搜索首次播放需下载上传，已缓存的歌曲秒发
+- 内联搜索首次播放需通过 Render 代理下载，已缓存的歌曲秒发
+- Render 不存储音频文件，全部在内存中处理，请求结束即释放
