@@ -2187,11 +2187,12 @@ def main():
                                 _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
                                 logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取失败: {e}")
 
-                        # 加载完成后存储到Redis（保留2天，确保当天可用）
-                        if all_songs and db.enabled and _pl_loaded == len(_today_playlists):
+                        # 加载完成或被打断后，只要有歌曲就存到Redis（下次可直接读取）
+                        if all_songs and db.enabled:
                             try:
                                 db._exec("SET", _redis_key, json.dumps(all_songs, ensure_ascii=False), "EX", 172800)
-                                logger.info(f"闲时缓存：💾 今日歌单{len(all_songs)}首已存入Redis（{_date_str}，保留2天）")
+                                _status = "全部加载" if _pl_loaded == len(_today_playlists) else f"部分加载({_pl_loaded}/{len(_today_playlists)})"
+                                logger.info(f"闲时缓存：💾 今日歌单{len(all_songs)}首已存入Redis（{_date_str}，{_status}，保留2天）")
                             except Exception as e:
                                 logger.warning(f"闲时缓存：存入Redis失败: {e}")
 
