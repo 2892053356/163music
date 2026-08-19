@@ -108,7 +108,6 @@ class UpstashDB:
             return {}
         keys = [f"cache:file_id:{sid}" for sid in song_ids]
         results = self._exec("MGET", *keys)
-        print(f"[Upstash] MGET keys={len(keys)} raw_result_type={type(results).__name__} raw={str(results)[:200]}")
         if not results:
             return {sid: "" for sid in song_ids}
         return {sid: (results[i] if i < len(results) and results[i] else "") for i, sid in enumerate(song_ids)}
