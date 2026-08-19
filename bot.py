@@ -958,7 +958,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 使用代理端点，无需预获取播放地址，直接用所有搜索结果
-    valid_songs = songs[:10]  # 最多10首
+    valid_songs = songs[:15]  # 最多15首
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
