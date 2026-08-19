@@ -2138,7 +2138,11 @@ def main():
                             try:
                                 all_songs = json.loads(cached_list)
                                 _redis_hit = True
-                                logger.info(f"闲时缓存：✅ Redis命中，读取曲库{len(all_songs)}首（跳过API调用）")
+                                # 刷新过期时间为7天（兼容旧的24小时key）
+                                db._exec("EXPIRE", "auto_cache:song_list", AUTO_CACHE_REDIS_EXPIRE)
+                                _ttl = db._exec("TTL", "auto_cache:song_list")
+                                _ttl_h = _ttl // 3600 if _ttl and _ttl > 0 else "未知"
+                                logger.info(f"闲时缓存：✅ Redis命中，读取曲库{len(all_songs)}首，TTL已刷新为7天（当前{_ttl_h}小时）")
                             except Exception as e:
                                 logger.warning(f"闲时缓存：Redis数据解析失败，重新获取: {e}")
                                 all_songs = []
