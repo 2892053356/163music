@@ -1070,7 +1070,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             if remaining <= 0:
                 break
             songs = await asyncio.wait_for(
-                asyncio.to_thread(api.search_songs_simple, keyword, 12),
+                asyncio.to_thread(api.search_songs_simple, keyword, 8),
                 timeout=remaining
             )
             if songs:
@@ -1106,7 +1106,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 使用代理端点，无需预获取播放地址，直接用所有搜索结果
-    valid_songs = songs[:12]  # 最多12首
+    valid_songs = songs[:8]  # 最多8首，减少超时概率
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
