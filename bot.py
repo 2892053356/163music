@@ -984,6 +984,8 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             asyncio.to_thread(db.get_file_ids_batch, [s["id"] for s in valid_songs]),
             timeout=3
         )
+        cached_count = sum(1 for v in file_id_map.values() if v and str(v).strip())
+        logger.info(f"内联搜索 file_id缓存查询: 命中{cached_count}/{len(valid_songs)} map={ {k: (v[:20]+'...' if v else 'None') for k,v in list(file_id_map.items())[:3]} }")
     except asyncio.TimeoutError:
         logger.warning("内联搜索 file_id批量查询超时，全部使用代理URL")
         file_id_map = {}
