@@ -175,10 +175,10 @@ async def audio_proxy_handler(request):
                 resp = await asyncio.wait_for(
                     asyncio.to_thread(
                         _download_session.get, play_url,
-                        timeout=(5, 25),
+                        timeout=(8, 25),
                         headers={"Referer": "https://music.163.com/"}
                     ),
-                    timeout=30
+                    timeout=33
                 )
                 if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
                     audio_content = resp.content
