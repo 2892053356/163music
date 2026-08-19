@@ -2090,9 +2090,13 @@ def main():
                             continue
 
                         logger.info(f"闲时自动缓存：曲库共{len(all_songs)}首（去重），待缓存{len(to_cache)}首")
+                        # 分批次缓存：每次闲时只处理20首，避免长时间占用资源
+                        BATCH_SIZE = 20
+                        batch = to_cache[:BATCH_SIZE]
+                        logger.info(f"闲时自动缓存：本次处理{len(batch)}/{len(to_cache)}首（分批进行）")
                         success = 0
                         failed = 0
-                        for idx, song in enumerate(to_cache, 1):
+                        for idx, song in enumerate(batch, 1):
                             # 最低优先级：最近10秒有用户活动则暂停
                             while time.time() - last_user_activity < 10:
                                 await asyncio.sleep(5)
@@ -2145,7 +2149,8 @@ def main():
                             # 最低优先级：每首之间间隔3秒，有用户活动时暂停更久
                             await asyncio.sleep(3)
 
-                        logger.info(f"闲时自动缓存完成：成功{success}首，失败{failed}首")
+                        remaining = len(to_cache) - len(batch)
+                        logger.info(f"闲时自动缓存批次完成：成功{success}首，失败{failed}首，剩余{remaining}首待下次闲时处理")
                     except Exception as e:
                         logger.error(f"闲时自动缓存异常: {e}")
                     finally:
