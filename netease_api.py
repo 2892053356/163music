@@ -124,7 +124,35 @@ class NeteaseAPI:
             "limit": limit,
             "offset": offset,
         }
-        return self._post(path, data)
+        result = self._post(path, data)
+        songs = result.get("result", {}).get("songs", [])
+        # 旧端点返回空时，尝试新版cloudsearch端点
+        if not songs:
+            try:
+                cloud_path = "/weapi/cloudsearch/get/web"
+                cloud_data = {
+                    "s": keyword,
+                    "type": 1,
+                    "limit": limit,
+                    "offset": offset,
+                }
+                cloud_result = self._post(cloud_path, cloud_data)
+                cloud_songs = cloud_result.get("result", {}).get("songs", [])
+                if cloud_songs:
+                    # 转换cloudsearch格式为旧格式（ar->artists, al->album, dt->duration）
+                    converted = []
+                    for s in cloud_songs:
+                        converted.append({
+                            "id": s.get("id"),
+                            "name": s.get("name", ""),
+                            "artists": [{"id": a.get("id"), "name": a.get("name", "")} for a in s.get("ar", [])],
+                            "album": {"id": s.get("al", {}).get("id"), "name": s.get("al", {}).get("name", ""), "picUrl": s.get("al", {}).get("picUrl", "")},
+                            "duration": s.get("dt", 0),
+                        })
+                    result = {"result": {"songs": converted, "songCount": cloud_result.get("result", {}).get("songCount", 0)}}
+            except Exception as e:
+                pass  # cloudsearch失败时保持原结果
+        return result
 
     # ----------------------------------------------------------
     # 获取歌曲播放地址
