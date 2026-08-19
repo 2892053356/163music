@@ -69,7 +69,8 @@ auto_cache_running = False  # 是否正在执行自动缓存
 auto_cache_enabled = True   # 自动缓存开关
 AUTO_CACHE_IDLE_THRESHOLD = 300  # 闲时阈值：5分钟无用户活动视为空闲
 # 闲时缓存的排行榜列表（多个榜单合集，覆盖更多歌曲）
-AUTO_CACHE_PLAYLISTS = [
+# 主榜单（优先缓存）
+AUTO_CACHE_PRIMARY_PLAYLISTS = [
     3778678,   # 热歌榜
     3779629,   # 新歌榜
     19723756,  # 飙升榜
@@ -79,6 +80,26 @@ AUTO_CACHE_PLAYLISTS = [
     71385487,  # 说唱榜
     112504,    # 华语金曲榜
 ]
+# 扩展榜单（主榜单缓存完后继续缓存）
+AUTO_CACHE_EXTENDED_PLAYLISTS = [
+    60198,     # 美国Billboard榜
+    60131,     # 日本Oricon榜
+    11641012,  # 英国Q杂志榜
+    180106,    # 韩国Mnet榜
+    71380410,  # 民谣榜
+    71380409,  # 摇滚榜
+    71380408,  # 流行榜
+    71380407,  # 轻音乐榜
+    71380406,  # 爵士榜
+    71380405,  # R&B榜
+    71380404,  # 乡村榜
+    3812895,   # 古典音乐榜
+    27135204,  # 台湾KKBOX榜
+    112463,    # 香港电台榜
+    71380403,  # 蓝调榜
+    71380402,  # 雷鬼榜
+]
+AUTO_CACHE_PLAYLISTS = AUTO_CACHE_PRIMARY_PLAYLISTS + AUTO_CACHE_EXTENDED_PLAYLISTS
 
 # ============================================================
 # 数据存储（Upstash Redis 持久化）
@@ -117,11 +138,11 @@ def _song_caption(song: dict) -> str:
     )
 
 
-def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
-    """给MP3写入ID3标签（标题、艺术家、专辑），确保Telegram显示正确信息"""
+def _tag_mp3(audio_bytes: io.BytesIO, song: dict, cover_url: str = None) -> io.BytesIO:
+    """给MP3写入ID3标签（标题、艺术家、专辑、封面），确保Telegram显示正确信息"""
     try:
         from mutagen.mp3 import MP3
-        from mutagen.id3 import ID3, TIT2, TPE1, TALB
+        from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC
         # 兼容两种字段格式：搜索结果(artist/album字符串) 和 歌曲详情(ar数组/al对象)
         name = song.get("name", "未知歌曲")
         if "artist" in song:
@@ -136,6 +157,14 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
             album = song["al"].get("name", "未知专辑")
         else:
             album = "未知专辑"
+        # 获取封面URL（优先参数，其次song中的cover/picUrl/al.picUrl）
+        if not cover_url:
+            if "cover" in song and song["cover"]:
+                cover_url = song["cover"]
+            elif "picUrl" in song and song["picUrl"]:
+                cover_url = song["picUrl"]
+            elif "al" in song and song["al"] and song["al"].get("picUrl"):
+                cover_url = song["al"]["picUrl"]
         audio_bytes.seek(0)
         audio = MP3(audio_bytes)
         if audio.tags is None:
@@ -143,6 +172,23 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
         audio.tags.add(TIT2(encoding=3, text=[name]))
         audio.tags.add(TPE1(encoding=3, text=[artist]))
         audio.tags.add(TALB(encoding=3, text=[album]))
+        # 嵌入专辑封面
+        if cover_url:
+            try:
+                import requests as _req
+                _cover_resp = _req.get(cover_url, timeout=5, headers={"Referer": "https://music.163.com/"})
+                if _cover_resp.status_code == 200 and _cover_resp.content:
+                    mime = "image/jpeg" if cover_url.endswith(".jpg") or cover_url.endswith(".jpeg") else "image/png"
+                    audio.tags.add(APIC(
+                        encoding=3,
+                        mime=mime,
+                        type=3,  # 3 = front cover
+                        desc="Cover",
+                        data=_cover_resp.content
+                    ))
+                    logger.info(f"ID3封面嵌入成功: {name} ({len(_cover_resp.content)//1024}KB)")
+            except Exception as cover_err:
+                logger.warning(f"ID3封面嵌入失败 {name}: {cover_err}")
         audio_bytes.seek(0)
         audio.save(audio_bytes)
         audio_bytes.seek(0)
@@ -224,8 +270,11 @@ async def audio_proxy_handler(request):
             return web.Response(status=502, text="Audio download failed")
         audio_bytes = io.BytesIO(audio_content)
 
-        # 写入ID3标签
+        # 写入ID3标签（含封面）
+        cover_url = request.query.get("cover", "")
         song = {"id": sid, "name": name, "artist": artist, "album": album or name}
+        if cover_url:
+            song["picUrl"] = cover_url
         tagged = _tag_mp3(audio_bytes, song)
         tagged.seek(0)
 
@@ -349,6 +398,13 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
     if not songs:
         await status_msg.edit_text(f"😢 没有找到与「{keyword}」相关的歌曲。")
         return
+
+    # 记录搜索到的歌曲ID，供闲时自动缓存扩展使用
+    for s in songs[:20]:
+        try:
+            await asyncio.to_thread(db.add_searched_song, s["id"])
+        except Exception:
+            pass
 
     # 存储搜索结果到user_data，供分页使用
     context.user_data["search_songs"] = songs
@@ -1032,7 +1088,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         else:
             # 未缓存：使用Render代理端点（Telegram→Render→CDN，稳定可靠）
-            proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}"
+            cover_param = ""
+            _cover = song.get("cover") or song.get("picUrl") or song.get("album_pic") or (song.get("al") or {}).get("picUrl")
+            if _cover:
+                cover_param = f"&cover={quote(_cover, safe='')}"
+            proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
             logger.info(f"内联结果 Render代理歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
             results.append(
                 InlineQueryResultAudio(
