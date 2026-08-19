@@ -811,24 +811,32 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退下载: {e}")
 
-    # 缓存未命中，下载音频到内存
-    try:
-        if edit:
-            await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-        resp = requests_get(url, timeout=45)
-        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-            raise Exception(f"下载异常: 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
-        audio_bytes = io.BytesIO(resp.content)
-        # 写入ID3标签，确保Telegram显示正确的标题和艺术家
-        audio_bytes = _tag_mp3(audio_bytes, song)
-        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-    except Exception as e:
-        logger.error(f"下载音频失败: {e}")
-        if edit:
-            await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
-        else:
-            await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
-        return
+    # 缓存未命中，下载音频到内存（重试1次）
+    audio_bytes = None
+    filename = None
+    for _retry in range(2):
+        try:
+            if edit and _retry == 0:
+                await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
+            resp = requests_get(url, timeout=50)
+            if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                raise Exception(f"下载异常: 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
+            audio_bytes = io.BytesIO(resp.content)
+            # 写入ID3标签，确保Telegram显示正确的标题和艺术家
+            audio_bytes = _tag_mp3(audio_bytes, song)
+            filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+            break
+        except Exception as e:
+            logger.warning(f"下载音频失败(第{_retry+1}次): {e}")
+            if _retry == 0:
+                await asyncio.sleep(1)  # 重试前等待1秒
+                continue
+            logger.error(f"下载音频最终失败: {e}")
+            if edit:
+                await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
+            else:
+                await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
+            return
 
     try:
         if edit:
@@ -884,12 +892,12 @@ _download_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 
 def requests_get(url: str, timeout: int = 45):
-    """同步 GET 请求（连接复用+1次重试+HTTP转HTTPS+Referer头）"""
+    """同步 GET 请求（连接复用+HTTP转HTTPS+Referer头）"""
     if url.startswith("http://"):
         url = "https://" + url[7:]
-    # 连接超时10秒（CDN不可达时快速失败），读取超时=总超时-10
-    connect_timeout = 10
-    read_timeout = max(timeout - connect_timeout, 15)
+    # 连接超时15秒（跨境连接需要更长时间），读取超时=总超时-15
+    connect_timeout = 15
+    read_timeout = max(timeout - connect_timeout, 20)
     return _download_session.get(url, timeout=(connect_timeout, read_timeout))
 
 
