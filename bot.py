@@ -2127,40 +2127,38 @@ def main():
                     return
                 auto_cache_running = True
                 _cache_start = time.time()
-                logger.info(f"闲时自动缓存：检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存多榜单曲库（共{len(AUTO_CACHE_PLAYLISTS)}个排行榜）")
+                logger.info(f"闲时自动缓存：检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存多榜单曲库（共{len(AUTO_CACHE_PLAYLISTS)}个排行榜，7天一个周期）")
                 try:
-                    # 优先从Redis读取已缓存的曲库列表（7天过期，每周更新）
+                    import datetime
+                    _today = datetime.datetime.now().weekday()  # 0=周一, 6=周日
+                    _day_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                    _per_day = [4, 4, 4, 3, 3, 3, 3]
+                    _start = sum(_per_day[:_today])
+                    _end = _start + _per_day[_today]
+                    _today_playlists = AUTO_CACHE_PLAYLISTS[_start:_end]
+
+                    # 从Redis读取已有的曲库列表（7天过期，每周一个周期）
                     all_songs = []
-                    _redis_hit = False
+                    _loaded_days = set()
                     if db.enabled:
                         cached_list = db._exec("GET", "auto_cache:song_list")
                         if cached_list:
                             try:
                                 all_songs = json.loads(cached_list)
-                                _redis_hit = True
-                                # 刷新过期时间为7天（兼容旧的24小时key）
-                                db._exec("EXPIRE", "auto_cache:song_list", AUTO_CACHE_REDIS_EXPIRE)
-                                _ttl = db._exec("TTL", "auto_cache:song_list")
-                                _ttl_h = _ttl // 3600 if _ttl and _ttl > 0 else "未知"
-                                logger.info(f"闲时缓存：✅ Redis命中，读取曲库{len(all_songs)}首，TTL已刷新为7天（当前{_ttl_h}小时）")
+                                logger.info(f"闲时缓存：✅ Redis读取曲库{len(all_songs)}首")
                             except Exception as e:
-                                logger.warning(f"闲时缓存：Redis数据解析失败，重新获取: {e}")
+                                logger.warning(f"闲时缓存：Redis数据解析失败: {e}")
                                 all_songs = []
-                        else:
-                            logger.info("闲时缓存：Redis未命中，将从API获取排行榜")
+                        # 读取本周已加载的天数
+                        _loaded = db._exec("SMEMBERS", "auto_cache:loaded_days")
+                        if _loaded:
+                            _loaded_days = set(int(d) for d in _loaded)
+                        logger.info(f"闲时缓存：📅 本周已加载{len(_loaded_days)}/7天，今天{_day_names[_today]}({'已加载' if _today in _loaded_days else '未加载'})")
 
-                    if not all_songs:
-                        # Redis无缓存，从多个排行榜获取歌曲合集
-                        # 24个排行榜分到7天缓存：4,4,4,3,3,3,3 = 24
-                        import datetime
-                        _today = datetime.datetime.now().weekday()  # 0=周一, 6=周日
-                        _per_day = [4, 4, 4, 3, 3, 3, 3]
-                        _start = sum(_per_day[:_today])
-                        _end = _start + _per_day[_today]
-                        _today_playlists = AUTO_CACHE_PLAYLISTS[_start:_end]
-                        _day_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-                        logger.info(f"闲时缓存：📅 今天{_day_names[_today]}，加载{len(_today_playlists)}个排行榜（第{_start+1}-{_end}个，共{len(AUTO_CACHE_PLAYLISTS)}个）")
-                        seen_ids = set()
+                    # 如果今天还没加载排行榜，则加载并追加到曲库
+                    if _today not in _loaded_days:
+                        logger.info(f"闲时缓存：📅 今天{_day_names[_today]}，加载{len(_today_playlists)}个排行榜（第{_start+1}-{_end}个）")
+                        seen_ids = set(s["id"] for s in all_songs)
                         _pl_loaded = 0
                         for pl_idx, pl_id in enumerate(_today_playlists, 1):
                             # 有用户活动则立即停止加载排行榜，优先处理用户请求
@@ -2189,13 +2187,21 @@ def main():
                                 _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
                                 logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取失败: {e}")
 
-                        # 加载完成或被打断后，将曲库存入Redis（7天过期，每周更新）
+                        # 加载完成后，将曲库存入Redis并标记今天已加载
                         if all_songs and db.enabled:
                             try:
                                 db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", AUTO_CACHE_REDIS_EXPIRE)
-                                logger.info(f"闲时缓存：📊 今日曲库加载完成：{_pl_loaded}/{len(_today_playlists)}个排行榜，去重后共{len(all_songs)}首，已存入Redis（7天过期）")
+                                # 只有全部加载完成才标记今天已加载
+                                if _pl_loaded == len(_today_playlists):
+                                    db._exec("SADD", "auto_cache:loaded_days", str(_today))
+                                    db._exec("EXPIRE", "auto_cache:loaded_days", AUTO_CACHE_REDIS_EXPIRE)
+                                    logger.info(f"闲时缓存：📊 今日排行榜加载完成：{_pl_loaded}/{len(_today_playlists)}个，曲库共{len(all_songs)}首，已存入Redis（7天周期）")
+                                else:
+                                    logger.info(f"闲时缓存：📊 今日排行榜部分加载：{_pl_loaded}/{len(_today_playlists)}个，曲库共{len(all_songs)}首，已存入Redis（下次继续）")
                             except Exception as e:
                                 logger.warning(f"闲时缓存：存入Redis失败: {e}")
+                    else:
+                        logger.info(f"闲时缓存：📅 今天{_day_names[_today]}排行榜已加载，直接使用曲库{len(all_songs)}首")
 
                     if not all_songs:
                         logger.warning("闲时自动缓存：❌ 获取曲库失败，无歌曲可缓存")
