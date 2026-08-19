@@ -134,6 +134,22 @@ def _is_admin(user_id: int) -> bool:
     return db.is_admin(user_id)
 
 
+async def _notify_all_admins(context, text: str):
+    """向所有管理员（主管理员+附加管理员）发送通知消息"""
+    admin_ids = set()
+    admin_ids.add(config.ADMIN_ID)
+    try:
+        for aid in db.get_admins():
+            admin_ids.add(aid)
+    except Exception:
+        pass
+    for aid in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=aid, text=text)
+        except Exception as e:
+            logger.warning(f"通知管理员失败 aid={aid}: {e}")
+
+
 # ============================================================
 # 工具函数
 # ============================================================
@@ -1664,25 +1680,36 @@ async def refresh_cookie_job(context: ContextTypes.DEFAULT_TYPE):
         new_cookie = await asyncio.to_thread(api.refresh_cookie)
         if new_cookie and new_cookie != old_cookie:
             db.set_cookie(new_cookie)
+            api.update_cookie(new_cookie)
             logger.info("Cookie 已自动刷新")
-            try:
-                await context.bot.send_message(
-                    chat_id=config.ADMIN_ID,
-                    text="🔄 网易云 Cookie 已自动刷新成功"
-                )
-            except Exception:
-                pass
+            await _notify_all_admins(context, "🔄 网易云 Cookie 已自动刷新成功")
         else:
             logger.info("Cookie 刷新未返回新值，保持当前")
     except Exception as e:
         logger.error(f"Cookie 自动刷新失败: {e}")
-        try:
-            await context.bot.send_message(
-                chat_id=config.ADMIN_ID,
-                text=f"⚠️ Cookie 自动刷新失败: {e}\n请使用 /setcookie 手动更新"
+        await _notify_all_admins(context, f"⚠️ Cookie 自动刷新失败: {e}\n请使用 /setcookie 手动更新")
+
+
+async def cookie_check_job(context: ContextTypes.DEFAULT_TYPE):
+    """定时任务：检测cookie是否过期，过期则通知所有管理员"""
+    try:
+        is_valid = await asyncio.to_thread(api.check_cookie_valid)
+        if not is_valid:
+            logger.warning("Cookie 已过期或无效，通知所有管理员")
+            await _notify_all_admins(
+                context,
+                "🚨 网易云 Cookie 已过期或无效！\n\n"
+                "歌曲搜索和播放可能无法正常工作。\n"
+                "请尽快使用以下方式更新：\n"
+                "1. /refreshcookie — 尝试自动刷新\n"
+                "2. /setcookie <cookie值> — 手动设置\n"
+                "3. 直接发送 MUSIC_U 的 value 值\n\n"
+                "查看当前状态：/cookie"
             )
-        except Exception:
-            pass
+        else:
+            logger.info("Cookie 状态检测：有效")
+    except Exception as e:
+        logger.error(f"Cookie 状态检测失败: {e}")
 
 
 async def cmd_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2205,18 +2232,36 @@ def main():
                         new = await asyncio.to_thread(api.refresh_cookie)
                         if new and new != old:
                             db.set_cookie(new)
+                            api.update_cookie(new)
                             logger.info("Cookie 已自动刷新")
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=config.ADMIN_ID,
-                                    text="🔄 网易云 Cookie 已自动刷新成功"
-                                )
-                            except Exception:
-                                pass
+                            await _notify_all_admins(application, "🔄 网易云 Cookie 已自动刷新成功")
                     except Exception as e:
                         logger.error(f"定时刷新失败: {e}")
 
             asyncio.create_task(_daily_refresh())
+
+            # 每小时检测cookie是否过期，过期则通知所有管理员
+            async def _hourly_cookie_check():
+                while True:
+                    await asyncio.sleep(3600)
+                    try:
+                        is_valid = await asyncio.to_thread(api.check_cookie_valid)
+                        if not is_valid:
+                            logger.warning("Cookie 已过期，通知所有管理员")
+                            await _notify_all_admins(
+                                application,
+                                "🚨 网易云 Cookie 已过期或无效！\n\n"
+                                "歌曲搜索和播放可能无法正常工作。\n"
+                                "请尽快更新：\n"
+                                "1. /refreshcookie — 尝试自动刷新\n"
+                                "2. /setcookie <值> — 手动设置\n"
+                                "3. 直接发送 MUSIC_U value\n\n"
+                                "查看状态：/cookie"
+                            )
+                    except Exception as e:
+                        logger.error(f"Cookie状态检测失败: {e}")
+
+            asyncio.create_task(_hourly_cookie_check())
 
             # 定时自动重启（每4小时），Render检测到进程退出后自动重启
             async def _auto_restart():
