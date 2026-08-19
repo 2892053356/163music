@@ -2205,11 +2205,18 @@ def main():
                     # 批量查询已缓存的file_id（1次Redis请求，避免逐个查询的延迟）
                     _all_ids = [s["id"] for s in all_songs]
                     _cached_map = db.get_file_ids_batch(_all_ids) if db.enabled else {}
+                    # 读取多次失败的歌曲ID（放弃缓存）
+                    _failed_ids = set()
+                    if db.enabled:
+                        _failed = db._exec("SMEMBERS", "auto_cache:failed")
+                        if _failed:
+                            _failed_ids = set(int(fid) for fid in _failed)
                     _cached_count = sum(1 for sid in _all_ids if _cached_map.get(sid))
-                    to_cache = [s for s in all_songs if not _cached_map.get(s["id"])]
-                    logger.info(f"闲时缓存：歌单共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首（批量查询耗时极短）")
+                    _failed_count = sum(1 for sid in _all_ids if sid in _failed_ids)
+                    to_cache = [s for s in all_songs if not _cached_map.get(s["id"]) and s["id"] not in _failed_ids]
+                    logger.info(f"闲时缓存：歌单共{len(all_songs)}首，已缓存{_cached_count}首，多次失败放弃{_failed_count}首，待缓存{len(to_cache)}首")
                     if not to_cache:
-                        logger.info("闲时自动缓存：✅ 今日歌单已全部缓存，无需处理")
+                        logger.info("闲时自动缓存：✅ 今日歌单已全部缓存或放弃，无需处理")
                         return
 
                     success = 0
@@ -2237,7 +2244,11 @@ def main():
                             url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
                             if not url:
                                 failed += 1
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址")
+                                # 无播放地址通常是VIP歌曲或API限制，加入放弃缓存集合（7天）
+                                if db.enabled:
+                                    db._exec("SADD", "auto_cache:failed", song["id"])
+                                    db._exec("EXPIRE", "auto_cache:failed", 604800)
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址（已加入放弃缓存）")
                                 continue
                             _dl_start = time.time()
                             resp = await asyncio.to_thread(requests_get, url, 45)
