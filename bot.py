@@ -474,7 +474,7 @@ async def _render_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ============================================================
 
 PLAYLIST_PAGE_SIZE = 10
-PLAYLIST_MAX_SONGS = 50
+PLAYLIST_MAX_SONGS = 1000  # 获取歌单完整列表（最多1000首）
 
 
 def _extract_playlist_id(text: str) -> int:
@@ -523,6 +523,8 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("😢 该歌单为空或无法访问。")
         return
 
+    logger.info(f"/playlist 歌单ID={playlist_id} 获取到{len(songs)}首歌曲")
+
     # 存储歌单歌曲到context，供回调使用
     context.user_data[f"playlist_{playlist_id}"] = songs
 
@@ -532,7 +534,7 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("▶️ 全部播放（自动发送）", callback_data=f"pall:{playlist_id}")],
     ]
     await status.edit_text(
-        f"📀 <b>歌单</b>（共{len(songs)}首，显示前{min(len(songs), PLAYLIST_MAX_SONGS)}首）\n\n请选择播放方式：",
+        f"📀 <b>歌单</b>（共{len(songs)}首）\n\n请选择播放方式：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML",
     )
