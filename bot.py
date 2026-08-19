@@ -2151,12 +2151,21 @@ def main():
 
                     if not all_songs:
                         # Redis无缓存，从多个排行榜获取歌曲合集
+                        # 24个排行榜分到7天缓存：4,4,4,3,3,3,3 = 24
+                        import datetime
+                        _today = datetime.datetime.now().weekday()  # 0=周一, 6=周日
+                        _per_day = [4, 4, 4, 3, 3, 3, 3]
+                        _start = sum(_per_day[:_today])
+                        _end = _start + _per_day[_today]
+                        _today_playlists = AUTO_CACHE_PLAYLISTS[_start:_end]
+                        _day_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                        logger.info(f"闲时缓存：📅 今天{_day_names[_today]}，加载{len(_today_playlists)}个排行榜（第{_start+1}-{_end}个，共{len(AUTO_CACHE_PLAYLISTS)}个）")
                         seen_ids = set()
                         _pl_loaded = 0
-                        for pl_idx, pl_id in enumerate(AUTO_CACHE_PLAYLISTS, 1):
+                        for pl_idx, pl_id in enumerate(_today_playlists, 1):
                             # 有用户活动则立即停止加载排行榜，优先处理用户请求
                             if time.time() - last_user_activity < 10:
-                                logger.info(f"闲时缓存：⚠️ 检测到用户活动，停止加载排行榜（已加载{_pl_loaded}/{len(AUTO_CACHE_PLAYLISTS)}个，共{len(all_songs)}首）")
+                                logger.info(f"闲时缓存：⚠️ 检测到用户活动，停止加载排行榜（已加载{_pl_loaded}/{len(_today_playlists)}个，共{len(all_songs)}首）")
                                 break
                             try:
                                 _pl_start = time.time()
@@ -2171,20 +2180,20 @@ def main():
                                             _new += 1
                                     _pl_loaded += 1
                                     _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
-                                    logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] {_pl_name}(ID={pl_id}) 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
+                                    logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
                                 else:
                                     _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
-                                    logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] {_pl_name}(ID={pl_id}) 返回空")
+                                    logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 返回空")
                                 await asyncio.sleep(0.5)  # 避免请求过快
                             except Exception as e:
                                 _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
-                                logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(AUTO_CACHE_PLAYLISTS)}] {_pl_name}(ID={pl_id}) 获取失败: {e}")
+                                logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取失败: {e}")
 
                         # 加载完成或被打断后，将曲库存入Redis（7天过期，每周更新）
                         if all_songs and db.enabled:
                             try:
                                 db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", AUTO_CACHE_REDIS_EXPIRE)
-                                logger.info(f"闲时缓存：📊 曲库加载完成：{_pl_loaded}/{len(AUTO_CACHE_PLAYLISTS)}个排行榜，去重后共{len(all_songs)}首，已存入Redis（7天过期）")
+                                logger.info(f"闲时缓存：📊 今日曲库加载完成：{_pl_loaded}/{len(_today_playlists)}个排行榜，去重后共{len(all_songs)}首，已存入Redis（7天过期）")
                             except Exception as e:
                                 logger.warning(f"闲时缓存：存入Redis失败: {e}")
 
