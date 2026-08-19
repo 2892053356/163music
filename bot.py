@@ -69,6 +69,7 @@ _processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
 # 闲时自动缓存状态
 auto_cache_running = False  # 是否正在执行自动缓存
 auto_cache_enabled = True   # 自动缓存开关
+_manual_cache_mode = False  # 手动缓存模式：跳过用户活动检测
 _do_auto_cache_func = None  # 立即缓存函数引用（在run_server中赋值）
 AUTO_CACHE_IDLE_THRESHOLD = 300  # 闲时阈值：5分钟无用户活动视为空闲
 # 闲时缓存的排行榜列表（多个榜单合集，覆盖更多歌曲）
@@ -689,9 +690,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("🔄 正在缓存中，请稍候...", show_alert=True)
             return
         if _do_auto_cache_func:
+            global _manual_cache_mode
+            _manual_cache_mode = True
             asyncio.create_task(_do_auto_cache_func())
             await query.answer("⚡ 立即缓存已启动！", show_alert=True)
-            await query.edit_message_text("⚡ 立即缓存已启动！\n\n正在缓存多榜单曲库，有用户活动时自动暂停。")
+            await query.edit_message_text("⚡ 立即缓存已启动！\n\n正在缓存今日排行榜，手动模式下不响应优先级暂停。")
         else:
             await query.answer("⚠️ 缓存功能未就绪", show_alert=True)
     elif data == "cache_status_refresh":
@@ -2127,7 +2130,8 @@ def main():
                     return
                 auto_cache_running = True
                 _cache_start = time.time()
-                logger.info(f"闲时自动缓存：检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存今日排行榜")
+                _mode = "⚡手动模式" if _manual_cache_mode else "♻️闲时模式"
+                logger.info(f"闲时自动缓存：{_mode} 检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存今日排行榜")
                 try:
                     import datetime
                     _today = datetime.datetime.now().weekday()  # 0=周一, 6=周日
@@ -2144,8 +2148,8 @@ def main():
                     seen_ids = set()
                     _pl_loaded = 0
                     for pl_idx, pl_id in enumerate(_today_playlists, 1):
-                        # 有用户活动则立即停止加载排行榜，优先处理用户请求
-                        if time.time() - last_user_activity < 10:
+                        # 有用户活动则立即停止加载排行榜（手动模式下跳过）
+                        if not _manual_cache_mode and time.time() - last_user_activity < 10:
                             logger.info(f"闲时缓存：⚠️ 检测到用户活动，停止加载排行榜（已加载{_pl_loaded}/{len(_today_playlists)}个，共{len(all_songs)}首）")
                             break
                         try:
@@ -2188,9 +2192,9 @@ def main():
                     failed = 0
                     _paused_count = 0
                     for idx, song in enumerate(to_cache, 1):
-                        # 最低优先级：最近10秒有用户活动则暂停
+                        # 最低优先级：最近10秒有用户活动则暂停（手动模式下跳过）
                         _paused = False
-                        while time.time() - last_user_activity < 10:
+                        while not _manual_cache_mode and time.time() - last_user_activity < 10:
                             if not _paused:
                                 logger.info(f"闲时缓存：⏸️ 检测到用户活动，暂停缓存（当前{idx}/{len(to_cache)}）")
                                 _paused = True
@@ -2255,6 +2259,10 @@ def main():
                     logger.error(f"闲时自动缓存异常: {e}")
                 finally:
                     auto_cache_running = False
+                    global _manual_cache_mode
+                    if _manual_cache_mode:
+                        _manual_cache_mode = False
+                        logger.info("闲时缓存：手动模式结束，恢复优先级检测")
 
             # 闲时自动缓存循环：每分钟检测是否空闲，空闲则调用_do_auto_cache
             async def _idle_auto_cache():
