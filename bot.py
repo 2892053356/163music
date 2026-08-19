@@ -2054,7 +2054,7 @@ def main():
                                 audio_bytes = io.BytesIO(resp.content)
                                 audio_bytes = _tag_mp3(audio_bytes, song)
                                 filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-                                msg = await context.bot.send_audio(
+                                msg = await application.bot.send_audio(
                                     chat_id=8684066933,  # 内联缓存专用管理员
                                     audio=audio_bytes,
                                     filename=filename,
@@ -2071,7 +2071,7 @@ def main():
                                     async def _del(mid):
                                         await asyncio.sleep(3)
                                         try:
-                                            await context.bot.delete_message(chat_id=8684066933, message_id=mid)
+                                            await application.bot.delete_message(chat_id=8684066933, message_id=mid)
                                         except Exception:
                                             pass
                                     asyncio.create_task(_del(msg.message_id))
