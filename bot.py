@@ -990,23 +990,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.warning("内联搜索 file_id批量查询超时，全部使用代理URL")
         file_id_map = {}
 
-    # 对未缓存的歌曲，批量获取播放地址，用于CF Worker代理
-    uncached_ids = [s["id"] for s in valid_songs if not file_id_map.get(s["id"])]
-    play_url_map = {}
-    if uncached_ids and config.CF_PROXY_URL:
-        try:
-            url_result = await asyncio.wait_for(
-                asyncio.to_thread(api.get_song_url, uncached_ids, level=config.MUSIC_QUALITY),
-                timeout=1.5
-            )
-            for item in url_result.get("data", []):
-                if item.get("url"):
-                    play_url_map[item["id"]] = item["url"]
-            logger.info(f"内联搜索 获取播放地址: {len(play_url_map)}/{len(uncached_ids)}")
-        except Exception as e:
-            logger.warning(f"内联搜索 获取播放地址失败: {e}")
-
-    # 构建结果：已缓存用CachedAudio秒发，未缓存用CF Worker代理URL
+    # 构建结果：已缓存用CachedAudio秒发，未缓存用Render代理URL（Telegram可访问onrender.com）
     from urllib.parse import quote
     results = []
     for song in valid_songs:
@@ -1030,26 +1014,8 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                     parse_mode="HTML",
                 )
             )
-        elif song["id"] in play_url_map:
-            # 未缓存但有播放地址：用CF Worker代理
-            cdn_url = play_url_map[song["id"]]
-            if cdn_url.startswith("http://"):
-                cdn_url = "https://" + cdn_url[7:]
-            cf_url = f"{config.CF_PROXY_URL.rstrip('/')}/proxy?url={quote(cdn_url, safe='')}"
-            logger.info(f"内联结果 CF代理歌曲 {song['name']} cf_url长度={len(cf_url)}")
-            results.append(
-                InlineQueryResultAudio(
-                    id=f"cf_{song['id']}",
-                    audio_url=cf_url,
-                    title=song["name"],
-                    performer=song["artist"],
-                    audio_duration=song["duration"] // 1000 if song.get("duration") else None,
-                    caption=caption,
-                    parse_mode="HTML",
-                )
-            )
         else:
-            # 无播放地址：回退到Render代理端点
+            # 未缓存：使用Render代理端点（Telegram→Render→CDN，稳定可靠）
             proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}"
             logger.info(f"内联结果 Render代理歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
             results.append(
