@@ -2219,11 +2219,16 @@ def main():
                     logger.info(f"闲时缓存：歌单共{len(all_songs)}首，已缓存{_cached_count}首，多次失败放弃{_failed_count}首，待缓存{len(to_cache)}首")
                     if not to_cache:
                         logger.info("闲时自动缓存：✅ 今日歌单已全部缓存或放弃，无需处理")
+                        # 标记今日已完成，今日不再闲时缓存
+                        if db.enabled:
+                            db._exec("SET", f"auto_cache:done:{_date_str}", "1", "EX", 86400)
+                            logger.info(f"闲时缓存：🏁 今日歌单已处理完毕，标记今日完成（{_date_str}），次日自动开启")
                         return
 
                     success = 0
                     failed = 0
                     _paused_count = 0
+                    _interrupted = False
                     for idx, song in enumerate(to_cache, 1):
                         # 最低优先级：最近10秒有用户活动则暂停
                         _paused = False
@@ -2238,6 +2243,7 @@ def main():
                         # 再次检查开关
                         if not auto_cache_enabled:
                             logger.info("闲时缓存：🔕 自动缓存已关闭，停止")
+                            _interrupted = True
                             break
 
                         try:
@@ -2303,6 +2309,10 @@ def main():
 
                     _total_time = time.time() - _cache_start
                     logger.info(f"闲时自动缓存完成：✅ 成功{success}首，❌ 失败{failed}首，⏸️ 暂停{_paused_count}次，总耗时{_total_time:.1f}s")
+                    # 正常完成（未被中断）则标记今日完成，今日不再闲时缓存
+                    if not _interrupted and db.enabled:
+                        db._exec("SET", f"auto_cache:done:{_date_str}", "1", "EX", 86400)
+                        logger.info(f"闲时缓存：🏁 今日歌单已处理完毕，标记今日完成（{_date_str}），次日自动开启")
                 except Exception as e:
                     logger.error(f"闲时自动缓存异常: {e}")
                 finally:
@@ -2317,6 +2327,11 @@ def main():
                     if auto_cache_running:
                         continue
                     if time.time() - last_user_activity < AUTO_CACHE_IDLE_THRESHOLD:
+                        continue
+                    # 今日歌单已缓存完毕则跳过，次日自动开启
+                    import datetime
+                    _today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                    if db.enabled and db._exec("EXISTS", f"auto_cache:done:{_today_str}"):
                         continue
                     asyncio.create_task(_do_auto_cache())
 
