@@ -2,8 +2,10 @@
 
 支持搜索、播放网易云音乐的 Telegram 机器人，带内联搜索、歌单播放和管理员功能。
 
-[![Latest Release](https://img.shields.io/github/v/release/2892053356/163music?label=Latest%20Release&style=for-the-badge)](https://github.com/2892053356/163music/releases)
-[![Releases](https://img.shields.io/badge/📦_查看所有版本-Releases-blue?style=for-the-badge)](https://github.com/2892053356/163music/releases)
+[![Latest Release](https://img.shields.io/github/v/release/XiOuDi/163music?label=Latest%20Release&style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
+[![Releases](https://img.shields.io/badge/📦_查看所有版本-Releases-blue?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
+
+> 🔗 **配套项目**：[cf-music-proxy](https://github.com/XiOuDi/cf-music-proxy) — Cloudflare Workers 音频代理，解决内联搜索 "webpage media empty" 问题
 
 ## ✨ 功能
 
@@ -61,6 +63,7 @@
 | `INLINE_RESULTS_LIMIT` | ❌ | 内联搜索结果数，默认 25 |
 | `DEFAULT_WELCOME` | ❌ | 默认欢迎语，支持 `{username}` 变量 |
 | `PROXY_URL` | ❌ | 代理地址，Render 不需要 |
+| `CF_PROXY_URL` | ❌ | Cloudflare Workers 代理地址（如 `https://cf-music-proxy.xxx.workers.dev`），用于内联搜索音频代理，推荐配置 |
 | `UPSTASH_REDIS_REST_URL` | ✅ | Upstash Redis REST URL |
 | `UPSTASH_REDIS_REST_TOKEN` | ✅ | Upstash Redis REST Token |
 
@@ -72,6 +75,15 @@
 4. 填入 Render 环境变量或本地 `.env`
 
 Upstash 免费版：每日 10000 次命令，256MB 存储，足够个人使用。
+
+### Cloudflare Workers 代理（推荐，解决内联搜索不稳定）
+
+内联搜索未缓存的歌曲需要从网易云 CDN 下载，Render（海外服务器）直连 CDN 不稳定，会出现 "webpage media empty"。使用 CF Worker 代理可大幅提升成功率。
+
+1. 部署 [cf-music-proxy](https://github.com/XiOuDi/cf-music-proxy)（免费，每天10万次请求）
+2. 获得 Worker URL（如 `https://cf-music-proxy.xxx.workers.dev`）
+3. 在 Render 环境变量中添加 `CF_PROXY_URL`
+4. 内联搜索未缓存歌曲将自动通过 CF Worker 代理下载
 
 ## ⚙️ BotFather 设置
 
