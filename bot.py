@@ -69,7 +69,6 @@ _processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
 # 闲时自动缓存状态
 auto_cache_running = False  # 是否正在执行自动缓存
 auto_cache_enabled = True   # 自动缓存开关
-_manual_cache_mode = False  # 手动缓存模式：跳过用户活动检测
 _do_auto_cache_func = None  # 立即缓存函数引用（在run_server中赋值）
 AUTO_CACHE_IDLE_THRESHOLD = 300  # 闲时阈值：5分钟无用户活动视为空闲
 # 闲时缓存的排行榜列表（多个榜单合集，覆盖更多歌曲）
@@ -690,11 +689,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("🔄 正在缓存中，请稍候...", show_alert=True)
             return
         if _do_auto_cache_func:
-            global _manual_cache_mode
-            _manual_cache_mode = True
+            # 将last_user_activity设为15秒前，避免按钮点击自身触发优先级暂停
+            global last_user_activity
+            last_user_activity = time.time() - 15
             asyncio.create_task(_do_auto_cache_func())
             await query.answer("⚡ 立即缓存已启动！", show_alert=True)
-            await query.edit_message_text("⚡ 立即缓存已启动！\n\n正在缓存今日排行榜，手动模式下不响应优先级暂停。")
+            await query.edit_message_text("⚡ 立即缓存已启动！\n\n正在缓存今日排行榜，有用户活动时自动暂停。")
         else:
             await query.answer("⚠️ 缓存功能未就绪", show_alert=True)
     elif data == "cache_status_refresh":
@@ -2125,76 +2125,97 @@ def main():
 
             # 闲时自动缓存核心逻辑（可被闲时检测或立即缓存按钮调用）
             async def _do_auto_cache():
-                global auto_cache_running, _manual_cache_mode
+                global auto_cache_running
                 if auto_cache_running:
                     return
                 auto_cache_running = True
                 _cache_start = time.time()
-                _mode = "⚡手动模式" if _manual_cache_mode else "♻️闲时模式"
-                logger.info(f"闲时自动缓存：{_mode} 检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存今日排行榜")
+                logger.info(f"闲时自动缓存：检测到空闲（{AUTO_CACHE_IDLE_THRESHOLD}秒无活动），开始缓存今日排行榜")
                 try:
                     import datetime
                     _today = datetime.datetime.now().weekday()  # 0=周一, 6=周日
+                    _date_str = datetime.datetime.now().strftime("%Y-%m-%d")
                     _day_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
                     _per_day = [4, 4, 4, 3, 3, 3, 3]
                     _start = sum(_per_day[:_today])
                     _end = _start + _per_day[_today]
                     _today_playlists = AUTO_CACHE_PLAYLISTS[_start:_end]
+                    _redis_key = f"auto_cache:songs:{_date_str}"
 
-                    logger.info(f"闲时缓存：📅 今天{_day_names[_today]}，加载{len(_today_playlists)}个排行榜（第{_start+1}-{_end}个，共{len(AUTO_CACHE_PLAYLISTS)}个）")
+                    logger.info(f"闲时缓存：📅 今天{_day_names[_today]}，加载{len(_today_playlists)}个排行榜（第{_start+1}-{_end}个）")
 
-                    # 加载今日排行榜
+                    # 优先从Redis读取今日歌单（每日获取后存储）
                     all_songs = []
-                    seen_ids = set()
-                    _pl_loaded = 0
-                    for pl_idx, pl_id in enumerate(_today_playlists, 1):
-                        # 有用户活动则立即停止加载排行榜（手动模式下跳过）
-                        if not _manual_cache_mode and time.time() - last_user_activity < 10:
-                            logger.info(f"闲时缓存：⚠️ 检测到用户活动，停止加载排行榜（已加载{_pl_loaded}/{len(_today_playlists)}个，共{len(all_songs)}首）")
-                            break
-                        try:
-                            _pl_start = time.time()
-                            songs = await asyncio.to_thread(api.get_toplist_songs, pl_id, 100)
-                            _pl_time = time.time() - _pl_start
-                            if songs:
-                                _new = 0
-                                for s in songs:
-                                    if s["id"] not in seen_ids:
-                                        seen_ids.add(s["id"])
-                                        all_songs.append(s)
-                                        _new += 1
-                                _pl_loaded += 1
-                                _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
-                                logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
-                            else:
-                                _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
-                                logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 返回空")
-                            await asyncio.sleep(0.5)  # 避免请求过快
-                        except Exception as e:
-                            _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
-                            logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取失败: {e}")
+                    if db.enabled:
+                        cached = db._exec("GET", _redis_key)
+                        if cached:
+                            try:
+                                all_songs = json.loads(cached)
+                                logger.info(f"闲时缓存：✅ 从Redis读取今日歌单{len(all_songs)}首（{_date_str}）")
+                            except Exception as e:
+                                logger.warning(f"闲时缓存：Redis歌单解析失败: {e}")
+                                all_songs = []
 
-                    logger.info(f"闲时缓存：📊 今日排行榜加载完成：{_pl_loaded}/{len(_today_playlists)}个，去重后共{len(all_songs)}首")
+                    # Redis无缓存，从API加载并存储
+                    if not all_songs:
+                        seen_ids = set()
+                        _pl_loaded = 0
+                        for pl_idx, pl_id in enumerate(_today_playlists, 1):
+                            # 有用户活动则立即停止加载排行榜，优先处理用户请求
+                            if time.time() - last_user_activity < 10:
+                                logger.info(f"闲时缓存：⚠️ 检测到用户活动，停止加载排行榜（已加载{_pl_loaded}/{len(_today_playlists)}个，共{len(all_songs)}首）")
+                                break
+                            try:
+                                _pl_start = time.time()
+                                songs = await asyncio.to_thread(api.get_toplist_songs, pl_id, 100)
+                                _pl_time = time.time() - _pl_start
+                                if songs:
+                                    _new = 0
+                                    for s in songs:
+                                        if s["id"] not in seen_ids:
+                                            seen_ids.add(s["id"])
+                                            all_songs.append(s)
+                                            _new += 1
+                                    _pl_loaded += 1
+                                    _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
+                                    logger.info(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取{len(songs)}首，新增{_new}首（耗时{_pl_time:.1f}s）")
+                                else:
+                                    _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
+                                    logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 返回空")
+                                await asyncio.sleep(0.5)  # 避免请求过快
+                            except Exception as e:
+                                _pl_name = PLAYLIST_NAMES.get(pl_id, f"未知榜({pl_id})")
+                                logger.warning(f"闲时缓存：排行榜[{pl_idx}/{len(_today_playlists)}] {_pl_name}(ID={pl_id}) 获取失败: {e}")
+
+                        # 加载完成后存储到Redis（保留2天，确保当天可用）
+                        if all_songs and db.enabled and _pl_loaded == len(_today_playlists):
+                            try:
+                                db._exec("SET", _redis_key, json.dumps(all_songs, ensure_ascii=False), "EX", 172800)
+                                logger.info(f"闲时缓存：💾 今日歌单{len(all_songs)}首已存入Redis（{_date_str}，保留2天）")
+                            except Exception as e:
+                                logger.warning(f"闲时缓存：存入Redis失败: {e}")
+
+                    logger.info(f"闲时缓存：📊 今日歌单共{len(all_songs)}首")
 
                     if not all_songs:
-                        logger.warning("闲时自动缓存：❌ 获取曲库失败，无歌曲可缓存")
+                        logger.warning("闲时自动缓存：❌ 获取歌单失败，无歌曲可缓存")
                         return
 
                     # 过滤已缓存的
                     _cached_count = sum(1 for s in all_songs if db.get_file_id(s["id"]))
                     to_cache = [s for s in all_songs if not db.get_file_id(s["id"])]
-                    logger.info(f"闲时缓存：曲库共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首")
+                    logger.info(f"闲时缓存：歌单共{len(all_songs)}首，已缓存{_cached_count}首，待缓存{len(to_cache)}首")
                     if not to_cache:
-                        logger.info("闲时自动缓存：✅ 曲库已全部缓存，无需处理")
+                        logger.info("闲时自动缓存：✅ 今日歌单已全部缓存，无需处理")
                         return
 
                     success = 0
                     failed = 0
                     _paused_count = 0
                     for idx, song in enumerate(to_cache, 1):
-                        # 最低优先级：最近10秒有用户活动则暂停（手动模式下跳过）
+                        # 最低优先级：最近10秒有用户活动则暂停
                         _paused = False
-                        while not _manual_cache_mode and time.time() - last_user_activity < 10:
+                        while time.time() - last_user_activity < 10:
                             if not _paused:
                                 logger.info(f"闲时缓存：⏸️ 检测到用户活动，暂停缓存（当前{idx}/{len(to_cache)}）")
                                 _paused = True
@@ -2259,9 +2280,6 @@ def main():
                     logger.error(f"闲时自动缓存异常: {e}")
                 finally:
                     auto_cache_running = False
-                    if _manual_cache_mode:
-                        _manual_cache_mode = False
-                        logger.info("闲时缓存：手动模式结束，恢复优先级检测")
 
             # 闲时自动缓存循环：每分钟检测是否空闲，空闲则调用_do_auto_cache
             async def _idle_auto_cache():
