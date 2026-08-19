@@ -63,6 +63,7 @@ api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
 # 用户活动时间戳（用于缓存任务优先级控制：有用户请求时暂停缓存）
 last_user_activity = 0
 inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
+_processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
 
 # 闲时自动缓存状态
 auto_cache_running = False  # 是否正在执行自动缓存
@@ -1988,6 +1989,14 @@ def main():
                         data = await request.json()
                         update = Update.de_json(data, application.bot)
                         if update:
+                            # update_id去重，防止Telegram重试导致重复处理
+                            if hasattr(update, 'update_id') and update.update_id:
+                                if update.update_id in _processed_update_ids:
+                                    return web.Response(text="OK")
+                                _processed_update_ids.add(update.update_id)
+                                # 只保留最近100个
+                                if len(_processed_update_ids) > 100:
+                                    _processed_update_ids.clear()
                             await application.update_queue.put(update)
                     except Exception as e:
                         logger.error(f"Webhook处理失败: {e}")
@@ -2120,7 +2129,8 @@ def main():
                                     logger.info(f"闲时缓存 [{idx}/{len(batch)}] ❌ {song['name']} - 下载失败 status={resp.status_code} size={len(resp.content) if resp.content else 0}")
                                     continue
                                 audio_bytes = io.BytesIO(resp.content)
-                                audio_bytes = _tag_mp3(audio_bytes, song)
+                                # _tag_mp3含同步封面下载，放入线程池避免阻塞事件循环
+                                audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
                                 filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
                                 msg = await application.bot.send_audio(
                                     chat_id=8684066933,  # 内联缓存专用管理员
