@@ -64,6 +64,11 @@ api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
 last_user_activity = 0
 inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
 
+# 闲时自动缓存状态
+auto_cache_running = False  # 是否正在执行自动缓存
+auto_cache_enabled = True   # 自动缓存开关
+AUTO_CACHE_IDLE_THRESHOLD = 300  # 闲时阈值：5分钟无用户活动视为空闲
+
 # ============================================================
 # 数据存储（Upstash Redis 持久化）
 # ============================================================
@@ -1135,7 +1140,9 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔄 <b>服务管理</b>\n"
         "🔁 /restart — 重启Render服务（每4小时自动重启一次）\n"
         "📊 /cachetop — 预热热歌榜前100首缓存\n"
-        "📋 /cacheplaylist 歌单ID — 缓存指定歌单全部歌曲\n\n"
+        "📋 /cacheplaylist 歌单ID — 缓存指定歌单全部歌曲\n"
+        "♻️ /autocache — 开关闲时自动缓存\n"
+        "📊 /cachestatus — 查看缓存状态\n\n"
         "👑 <b>管理员管理</b>（仅主管理员）\n"
         "➕ /addadmin 用户ID — 添加管理员\n"
         "➖ /removeadmin 用户ID — 移除管理员\n"
@@ -1638,6 +1645,43 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_do_cache())
 
 
+async def cmd_autocache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：开关闲时自动缓存"""
+    global auto_cache_enabled
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    auto_cache_enabled = not auto_cache_enabled
+    status = "✅ 已开启" if auto_cache_enabled else "❌ 已关闭"
+    await update.message.reply_text(f"♻️ 闲时自动缓存{status}\n\n空闲5分钟无用户活动时自动缓存热歌榜前100首，有用户请求时立即暂停。")
+
+
+async def cmd_cachestatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：查看缓存状态"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    # 统计已缓存数量
+    try:
+        keys = db._exec("KEYS", "cache:file_id:*")
+        cached_count = len(keys) if keys else 0
+    except Exception:
+        cached_count = "未知"
+    idle_time = int(time.time() - last_user_activity) if last_user_activity else "从未"
+    running = "🔄 正在缓存中" if auto_cache_running else "⏸️ 未在缓存"
+    enabled = "✅ 已开启" if auto_cache_enabled else "❌ 已关闭"
+    await update.message.reply_text(
+        f"📊 缓存状态\n\n"
+        f"♻️ 自动缓存：{enabled}\n"
+        f"🔄 当前状态：{running}\n"
+        f"💾 已缓存歌曲：{cached_count} 首\n"
+        f"⏱️ 距上次用户活动：{idle_time}秒\n"
+        f"📋 闲时阈值：{AUTO_CACHE_IDLE_THRESHOLD}秒（5分钟）"
+    )
+
+
 async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员：缓存指定歌单的全部歌曲（低优先级）"""
     user = update.effective_user
@@ -1815,6 +1859,8 @@ def main():
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
     application.add_handler(CommandHandler("restart", cmd_restart))
     application.add_handler(CommandHandler("cachetop", cmd_cachetop))
+    application.add_handler(CommandHandler("autocache", cmd_autocache))
+    application.add_handler(CommandHandler("cachestatus", cmd_cachestatus))
     application.add_handler(CommandHandler("cacheplaylist", cmd_cacheplaylist))
 
     # 管理员上传 .txt 文件设置 cookie
@@ -1929,6 +1975,94 @@ def main():
                         logger.error(f"自动重启失败: {e}")
 
             asyncio.create_task(_auto_restart())
+
+            # 闲时自动缓存热歌榜（最低优先级，有用户活动时暂停）
+            async def _idle_auto_cache():
+                global auto_cache_running
+                while True:
+                    await asyncio.sleep(60)  # 每分钟检查一次
+                    if not auto_cache_enabled:
+                        continue
+                    if auto_cache_running:
+                        continue
+                    # 检查是否空闲（5分钟无用户活动）
+                    if time.time() - last_user_activity < AUTO_CACHE_IDLE_THRESHOLD:
+                        continue
+
+                    auto_cache_running = True
+                    logger.info("闲时自动缓存：检测到空闲，开始缓存热歌榜")
+                    try:
+                        # 获取热歌榜前100首
+                        songs = await asyncio.to_thread(api.get_toplist_songs, 3778678, 100)
+                        if not songs:
+                            logger.warning("闲时自动缓存：获取热歌榜失败")
+                            continue
+
+                        # 过滤已缓存的
+                        to_cache = [s for s in songs if not db.get_file_id(s["id"])]
+                        if not to_cache:
+                            logger.info("闲时自动缓存：热歌榜已全部缓存，无需处理")
+                            continue
+
+                        logger.info(f"闲时自动缓存：热歌榜{len(songs)}首，待缓存{len(to_cache)}首")
+                        success = 0
+                        failed = 0
+                        for idx, song in enumerate(to_cache, 1):
+                            # 有用户活动则暂停
+                            while time.time() - last_user_activity < 5:
+                                await asyncio.sleep(3)
+                            # 再次检查开关
+                            if not auto_cache_enabled:
+                                break
+
+                            try:
+                                url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
+                                if not url:
+                                    failed += 1
+                                    continue
+                                resp = await asyncio.to_thread(requests_get, url, 45)
+                                if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                                    failed += 1
+                                    continue
+                                audio_bytes = io.BytesIO(resp.content)
+                                audio_bytes = _tag_mp3(audio_bytes, song)
+                                filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+                                msg = await context.bot.send_audio(
+                                    chat_id=8684066933,  # 内联缓存专用管理员
+                                    audio=audio_bytes,
+                                    filename=filename,
+                                    title=song["name"],
+                                    performer=song["artist"],
+                                    caption=f"♻️ 闲时缓存 {idx}/{len(to_cache)}",
+                                    duration=song["duration"] // 1000 if song.get("duration") else None,
+                                )
+                                if msg and msg.audio and msg.audio.file_id:
+                                    db.set_file_id(song["id"], msg.audio.file_id)
+                                    success += 1
+                                    # 延迟删除临时消息
+                                    async def _del(mid):
+                                        await asyncio.sleep(3)
+                                        try:
+                                            await context.bot.delete_message(chat_id=8684066933, message_id=mid)
+                                        except Exception:
+                                            pass
+                                    asyncio.create_task(_del(msg.message_id))
+                                else:
+                                    failed += 1
+                            except Exception as e:
+                                failed += 1
+                                logger.warning(f"闲时缓存失败 {song['name']}: {e}")
+
+                            # 每首之间间隔1秒，避免过快
+                            await asyncio.sleep(1)
+
+                        logger.info(f"闲时自动缓存完成：成功{success}首，失败{failed}首")
+                    except Exception as e:
+                        logger.error(f"闲时自动缓存异常: {e}")
+                    finally:
+                        auto_cache_running = False
+
+            asyncio.create_task(_idle_auto_cache())
 
             try:
                 while True:
