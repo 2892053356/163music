@@ -653,11 +653,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("play:"):
         song_id = int(data.split(":", 1)[1])
         await _play_song(update, context, song_id, edit=True)
-    elif data.startswith("play_private:"):
-        # 内联结果中的"在私聊播放"按钮：向用户私聊发送歌曲
-        song_id = int(data.split(":", 1)[1])
-        await query.answer("🎵 正在私聊为你发送歌曲...", show_alert=False)
-        asyncio.create_task(_send_song_to_private(context, user.id, song_id))
     elif data.startswith("searchpage:"):
         page = int(data.split(":", 1)[1])
         await _render_search_page(update, context, page)
@@ -1238,9 +1233,10 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"{via_line}"
         )
 
-        # 私聊播放按钮
+        # 私聊播放按钮：点击跳转到bot并自动播放（deep link）
+        bot_uname = context.bot.username or "XiOuDi163_bot"
         play_private_btn = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🎵 在私聊播放", callback_data=f"play_private:{song['id']}")
+            InlineKeyboardButton("🎵 点击在bot中播放", url=f"https://t.me/{bot_uname}?start=play_{song['id']}")
         ]])
 
         cached_fid = file_id_map.get(song["id"])
