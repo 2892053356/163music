@@ -106,13 +106,27 @@ def _tag_mp3(audio_bytes: io.BytesIO, song: dict) -> io.BytesIO:
     try:
         from mutagen.mp3 import MP3
         from mutagen.id3 import ID3, TIT2, TPE1, TALB
+        # 兼容两种字段格式：搜索结果(artist/album字符串) 和 歌曲详情(ar数组/al对象)
+        name = song.get("name", "未知歌曲")
+        if "artist" in song:
+            artist = song["artist"]
+        elif "ar" in song and song["ar"]:
+            artist = "/".join([a.get("name", "") for a in song["ar"] if a.get("name")])
+        else:
+            artist = "未知艺术家"
+        if "album" in song:
+            album = song["album"]
+        elif "al" in song and song["al"]:
+            album = song["al"].get("name", "未知专辑")
+        else:
+            album = "未知专辑"
         audio_bytes.seek(0)
         audio = MP3(audio_bytes)
         if audio.tags is None:
             audio.add_tags()
-        audio.tags.add(TIT2(encoding=3, text=[song["name"]]))
-        audio.tags.add(TPE1(encoding=3, text=[song["artist"]]))
-        audio.tags.add(TALB(encoding=3, text=[song["album"]]))
+        audio.tags.add(TIT2(encoding=3, text=[name]))
+        audio.tags.add(TPE1(encoding=3, text=[artist]))
+        audio.tags.add(TALB(encoding=3, text=[album]))
         audio_bytes.seek(0)
         audio.save(audio_bytes)
         audio_bytes.seek(0)
