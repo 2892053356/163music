@@ -1122,7 +1122,15 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
         songs_detail = detail.get("songs", [])
         if not songs_detail:
             return
-        song = songs_detail[0]
+        raw_song = songs_detail[0]
+        # 统一转换为标准格式（兼容网易云API原始字段 ar/al/dt）
+        song = {
+            "id": raw_song.get("id", song_id),
+            "name": raw_song.get("name", "未知歌曲"),
+            "artist": "/".join([a.get("name", "") for a in raw_song.get("ar", []) if a.get("name")]) or "未知艺术家",
+            "album": (raw_song.get("al") or {}).get("name", "未知专辑"),
+            "duration": raw_song.get("dt", 0),
+        }
         # 后台缓存到管理员
         asyncio.create_task(_cache_song_to_admin(context, song, url))
     except Exception as e:
