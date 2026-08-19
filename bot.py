@@ -2248,6 +2248,7 @@ def main():
                                     try:
                                         all_songs = [s for s in all_songs if s["id"] != song["id"]]
                                         db._exec("SET", "auto_cache:song_list", json.dumps(all_songs, ensure_ascii=False), "EX", AUTO_CACHE_REDIS_EXPIRE)
+                                        logger.info(f"闲时缓存：🗑️ Redis曲库移除已缓存歌曲《{song['name']}》，剩余{len(all_songs)}首")
                                     except Exception as e:
                                         logger.warning(f"闲时缓存：更新Redis曲库失败: {e}")
                                 # 延迟删除临时消息
