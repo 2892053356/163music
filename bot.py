@@ -653,6 +653,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("play:"):
         song_id = int(data.split(":", 1)[1])
         await _play_song(update, context, song_id, edit=True)
+    elif data.startswith("play_private:"):
+        # 内联结果中的"在私聊播放"按钮：向用户私聊发送歌曲
+        song_id = int(data.split(":", 1)[1])
+        await query.answer("🎵 正在私聊为你发送歌曲...", show_alert=False)
+        asyncio.create_task(_send_song_to_private(context, user.id, song_id))
     elif data.startswith("searchpage:"):
         page = int(data.split(":", 1)[1])
         await _render_search_page(update, context, page)
@@ -891,6 +896,81 @@ def requests_get(url: str, timeout: int = 45):
     connect_timeout = 10
     read_timeout = max(timeout - connect_timeout, 15)
     return _download_session.get(url, timeout=(connect_timeout, read_timeout))
+
+
+async def _send_song_to_private(context, user_id: int, song_id: int):
+    """向用户私聊发送指定歌曲（内联结果"在私聊播放"按钮使用）"""
+    try:
+        # 获取歌曲详情
+        detail = await asyncio.to_thread(api.get_song_detail, [song_id])
+        songs_detail = detail.get("songs", [])
+        if not songs_detail:
+            await context.bot.send_message(user_id, f"❌ 未找到歌曲(ID={song_id})")
+            return
+        raw_song = songs_detail[0]
+        song = {
+            "id": raw_song.get("id", song_id),
+            "name": raw_song.get("name", "未知歌曲"),
+            "artist": "/".join([a.get("name", "") for a in raw_song.get("ar", []) if a.get("name")]) or "未知艺术家",
+            "album": (raw_song.get("al") or {}).get("name", "未知专辑"),
+            "duration": raw_song.get("dt", 0),
+            "cover": (raw_song.get("al") or {}).get("picUrl", ""),
+        }
+        # 检查是否已缓存
+        cached_fid = await asyncio.to_thread(db.get_file_id, song_id)
+        if cached_fid:
+            await context.bot.send_audio(
+                chat_id=user_id,
+                audio=cached_fid,
+                title=song["name"],
+                performer=song["artist"],
+                caption=f"🎵 {song['name']}\n👤 {song['artist']}\n💿 {song['album']}",
+                parse_mode="HTML",
+            )
+            logger.info(f"私聊播放 用户={user_id} 歌曲={song['name']} 使用缓存file_id")
+            return
+        # 获取播放地址
+        url_result = await asyncio.to_thread(api.get_song_url, [song_id], level=config.MUSIC_QUALITY)
+        url = None
+        for item in url_result.get("data", []):
+            if item.get("id") == song_id:
+                url = item.get("url")
+                break
+        if not url:
+            await context.bot.send_message(user_id, f"❌ 歌曲《{song['name']}》暂无播放地址（可能需要VIP）")
+            return
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+        # 下载
+        status_msg = await context.bot.send_message(user_id, f"📥 正在下载《{song['name']}》...")
+        resp = await asyncio.to_thread(requests_get, url, 45)
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+            await context.bot.edit_message_text(chat_id=user_id, message_id=status_msg.message_id, text=f"❌ 下载失败 status={resp.status_code}")
+            return
+        audio_bytes = io.BytesIO(resp.content)
+        audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
+        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+        msg = await context.bot.send_audio(
+            chat_id=user_id,
+            audio=audio_bytes,
+            filename=filename,
+            title=song["name"],
+            performer=song["artist"],
+            caption=f"🎵 {song['name']}\n👤 {song['artist']}\n💿 {song['album']}",
+            parse_mode="HTML",
+            duration=song["duration"] // 1000 if song.get("duration") else None,
+        )
+        await context.bot.delete_message(chat_id=user_id, message_id=status_msg.message_id)
+        # 缓存file_id
+        if msg and msg.audio and msg.audio.file_id:
+            await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+        logger.info(f"私聊播放 用户={user_id} 歌曲={song['name']} 发送成功")
+    except Exception as e:
+        logger.error(f"私聊播放失败 user_id={user_id} song_id={song_id}: {e}", exc_info=True)
+        try:
+            await context.bot.send_message(user_id, f"❌ 发送失败: {e}")
+        except Exception:
+            pass
 
 
 async def _cache_song_to_admin(context, song, url):
@@ -1158,6 +1238,11 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"{via_line}"
         )
 
+        # 私聊播放按钮
+        play_private_btn = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🎵 在私聊播放", callback_data=f"play_private:{song['id']}")
+        ]])
+
         cached_fid = file_id_map.get(song["id"])
         if cached_fid and str(cached_fid).strip():
             fid = str(cached_fid).strip()
@@ -1168,6 +1253,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                     audio_file_id=fid,
                     caption=caption,
                     parse_mode="HTML",
+                    reply_markup=play_private_btn,
                 )
             )
         else:
@@ -1187,6 +1273,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                     audio_duration=song["duration"] // 1000 if song.get("duration") else None,
                     caption=caption,
                     parse_mode="HTML",
+                    reply_markup=play_private_btn,
                 )
             )
 
