@@ -102,6 +102,14 @@ class UpstashDB:
         result = self._exec("GET", f"cache:file_id:{song_id}")
         return result if result else ""
 
+    def get_file_ids_batch(self, song_ids: list) -> dict:
+        """批量获取file_id，返回 {song_id: file_id} 字典"""
+        if not song_ids:
+            return {}
+        keys = [f"cache:file_id:{sid}" for sid in song_ids]
+        results = self._exec("MGET", *keys)
+        return {sid: (results[i] if results and results[i] else "") for i, sid in enumerate(song_ids)}
+
     def set_file_id(self, song_id: int, file_id: str):
         self._exec("SET", f"cache:file_id:{song_id}", file_id)
 

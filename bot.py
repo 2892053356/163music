@@ -916,13 +916,13 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     songs = []
     search_start = time.time()
-    for attempt in range(1):  # 只尝试1次，总超时3秒，避免查询过期
+    for attempt in range(1):  # 只尝试1次，总超时2秒，避免查询过期
         try:
-            remaining = 3 - (time.time() - search_start)
+            remaining = 2 - (time.time() - search_start)
             if remaining <= 0:
                 break
             songs = await asyncio.wait_for(
-                asyncio.to_thread(api.search_songs_simple, keyword, 10),
+                asyncio.to_thread(api.search_songs_simple, keyword, 12),
                 timeout=remaining
             )
             if songs:
@@ -958,19 +958,21 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 使用代理端点，无需预获取播放地址，直接用所有搜索结果
-    valid_songs = songs[:10]  # 最多10首
+    valid_songs = songs[:12]  # 最多12首
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
-    # 并发获取所有歌曲的file_id缓存（2秒超时，避免Redis慢导致查询过期）
-    file_id_tasks = [asyncio.to_thread(db.get_file_id, song["id"]) for song in valid_songs]
+    # 并发获取所有歌曲的file_id缓存（1秒超时，避免Redis慢导致查询过期）
+    # 批量获取所有歌曲的file_id缓存（3秒超时，MGET单次查询减少网络往返）
     try:
-        file_id_results = await asyncio.wait_for(asyncio.gather(*file_id_tasks), timeout=2)
+        file_id_map = await asyncio.wait_for(
+            asyncio.to_thread(db.get_file_ids_batch, [s["id"] for s in valid_songs]),
+            timeout=3
+        )
     except asyncio.TimeoutError:
-        logger.warning("内联搜索 file_id查询超时，全部使用代理URL")
-        file_id_results = [None] * len(valid_songs)
-    file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
+        logger.warning("内联搜索 file_id批量查询超时，全部使用代理URL")
+        file_id_map = {}
 
     # 对未缓存的歌曲，批量获取播放地址，用于CF Worker代理
     uncached_ids = [s["id"] for s in valid_songs if not file_id_map.get(s["id"])]
@@ -979,7 +981,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             url_result = await asyncio.wait_for(
                 asyncio.to_thread(api.get_song_url, uncached_ids, level=config.MUSIC_QUALITY),
-                timeout=3
+                timeout=1.5
             )
             for item in url_result.get("data", []):
                 if item.get("url"):
