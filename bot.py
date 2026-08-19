@@ -916,13 +916,13 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     songs = []
     search_start = time.time()
-    for attempt in range(1):  # 只尝试1次，总超时3秒，避免查询过期
+    for attempt in range(1):  # 只尝试1次，总超时5秒，避免查询过期
         try:
-            remaining = 3 - (time.time() - search_start)
+            remaining = 5 - (time.time() - search_start)
             if remaining <= 0:
                 break
             songs = await asyncio.wait_for(
-                asyncio.to_thread(api.search_songs_simple, keyword, 10),
+                asyncio.to_thread(api.search_songs_simple, keyword, 15),
                 timeout=remaining
             )
             if songs:
