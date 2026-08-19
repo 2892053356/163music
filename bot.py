@@ -718,16 +718,19 @@ _download_session = requests.Session()
 _download_session.headers.update({"Referer": "https://music.163.com/"})
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+_retry = Retry(total=1, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504], connect=1, read=1)
 _download_session.mount("http://", HTTPAdapter(max_retries=_retry))
 _download_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 
 def requests_get(url: str, timeout: int = 45):
-    """同步 GET 请求（连接复用+3次重试+HTTP转HTTPS+Referer头）"""
+    """同步 GET 请求（连接复用+1次重试+HTTP转HTTPS+Referer头）"""
     if url.startswith("http://"):
         url = "https://" + url[7:]
-    return _download_session.get(url, timeout=timeout)
+    # 连接超时10秒（CDN不可达时快速失败），读取超时=总超时-10
+    connect_timeout = 10
+    read_timeout = max(timeout - connect_timeout, 15)
+    return _download_session.get(url, timeout=(connect_timeout, read_timeout))
 
 
 async def _cache_song_to_admin(context, song, url):
@@ -948,88 +951,18 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
-    # 并发获取所有歌曲的file_id缓存
+    # 并发获取所有歌曲的file_id缓存（2秒超时，避免Redis慢导致查询过期）
     file_id_tasks = [asyncio.to_thread(db.get_file_id, song["id"]) for song in valid_songs]
-    file_id_results = await asyncio.gather(*file_id_tasks)
+    try:
+        file_id_results = await asyncio.wait_for(asyncio.gather(*file_id_tasks), timeout=2)
+    except asyncio.TimeoutError:
+        logger.warning("内联搜索 file_id查询超时，全部使用代理URL")
+        file_id_results = [None] * len(valid_songs)
     file_id_map = {song["id"]: fid for song, fid in zip(valid_songs, file_id_results)}
-
-    # 对未缓存的歌曲，批量预获取播放地址，过滤无有效URL的歌曲（避免webpage media empty）
-    uncached_ids = [s["id"] for s in valid_songs if not file_id_map.get(s["id"])]
-    valid_url_map = {}
-    if uncached_ids:
-        try:
-            url_result = await asyncio.wait_for(
-                asyncio.to_thread(api.get_song_url, uncached_ids, level=config.MUSIC_QUALITY),
-                timeout=3
-            )
-            for item in url_result.get("data", []):
-                if item.get("url"):
-                    valid_url_map[item["id"]] = item["url"]
-        except Exception as e:
-            logger.warning(f"内联搜索 预获取播放地址失败: {e}")
-
-    # 对有URL的未缓存歌曲，并发HEAD请求验证CDN实际可下载（Content-Length>1000）
-    downloadable_ids = set()
-    urls_to_check = {sid: url for sid, url in valid_url_map.items()}
-    if urls_to_check:
-        async def _check_url(sid, url):
-            try:
-                # HTTP转HTTPS
-                if url.startswith("http://"):
-                    url = "https://" + url[7:]
-                resp = await asyncio.to_thread(
-                    _download_session.head, url, timeout=10,
-                    headers={"Referer": "https://music.163.com/"}
-                )
-                cl = resp.headers.get("Content-Length", "0")
-                if resp.status_code == 200 and int(cl) > 1000:
-                    return sid
-                # HEAD可能不被支持，尝试GET只读取头部
-                resp2 = await asyncio.to_thread(
-                    _download_session.get, url, timeout=10, stream=True,
-                    headers={"Referer": "https://music.163.com/"}
-                )
-                cl2 = resp2.headers.get("Content-Length", "0")
-                if resp2.status_code == 200 and int(cl2) > 1000:
-                    return sid
-            except Exception as e:
-                logger.warning(f"内联搜索 HEAD检查失败 song_id={sid}: {e}")
-            return None
-
-        check_tasks = [_check_url(sid, url) for sid, url in urls_to_check.items()]
-        check_results = await asyncio.wait_for(asyncio.gather(*check_tasks), timeout=12)
-        downloadable_ids = {sid for sid in check_results if sid}
-        logger.info(f"内联搜索 HEAD检查通过: {len(downloadable_ids)}/{len(urls_to_check)}")
-
-    # 过滤：已缓存 + HEAD检查通过的未缓存歌曲
-    filtered_songs = []
-    for s in valid_songs:
-        if file_id_map.get(s["id"]):
-            filtered_songs.append(s)
-        elif s["id"] in downloadable_ids:
-            filtered_songs.append(s)
-        else:
-            logger.info(f"内联搜索 过滤歌曲: {s['name']}({s['artist']}) 无播放地址或CDN不可下载")
-
-    logger.info(f"内联搜索 过滤后有效: {len(filtered_songs)}/{len(valid_songs)}")
-
-    if not filtered_songs:
-        results = [
-            InlineQueryResultArticle(
-                id="no_playable",
-                title=f"「{keyword}」暂无可用播放源",
-                description="换个关键词试试，或用 /music 搜索",
-                input_message_content=InputTextMessageContent(
-                    f"😢 「{keyword}」暂无可用播放源。\n💡 试试用 /music {keyword} 搜索播放"
-                ),
-            )
-        ]
-        await query.answer(results, cache_time=0, is_personal=True)
-        return
 
     # 构建结果：已缓存用CachedAudio秒发，未缓存用代理端点URL
     results = []
-    for song in filtered_songs:
+    for song in valid_songs:
 
         caption = (
             f"🎵 <b>{song['name']}</b>\n"
@@ -1775,18 +1708,21 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    err = context.error
+    err_type = type(err).__name__ if err else "None"
+    err_msg = str(err) if err else ""
     if update.inline_query:
         q = update.inline_query
         user = q.from_user
         user_label = f"{user.username or user.first_name or user.id}"
-        logger.error(f"内联查询错误 用户={user_label}(id={user.id}) 关键词='{q.query}' 错误: {context.error}")
+        logger.error(f"内联查询错误 用户={user_label}(id={user.id}) 关键词='{q.query}' 类型={err_type} 错误={err_msg}")
     elif update.callback_query:
         cb = update.callback_query
         user = cb.from_user
         user_label = f"{user.username or user.first_name or user.id}"
-        logger.error(f"回调错误 用户={user_label}(id={user.id}) data='{cb.data}' 错误: {context.error}")
+        logger.error(f"回调错误 用户={user_label}(id={user.id}) data='{cb.data}' 类型={err_type} 错误={err_msg}")
     else:
-        logger.error(f"更新 {update} 引发错误: {context.error}")
+        logger.error(f"更新 {update} 引发错误: 类型={err_type} 错误={err_msg}")
 
 
 # ============================================================
