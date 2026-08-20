@@ -696,14 +696,13 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
     asyncio.create_task(_send_all())
 
 
-async def _resume_playlist_play(user_id: int, playlist_id: int, songs: list, start_index: int, total: int):
+async def _resume_playlist_play(application, user_id: int, playlist_id: int, songs: list, start_index: int, total: int):
     """断点续播：从指定进度继续播放歌单（服务重启后恢复）"""
-    from telegram.ext import ContextTypes
-    # 获取application的bot对象（通过全局变量或直接创建）
+    # 获取application的bot对象
     try:
         bot = application.bot
-    except Exception:
-        logger.error(f"歌单续播：无法获取bot对象 用户={user_id}")
+    except Exception as e:
+        logger.error(f"歌单续播：无法获取bot对象 用户={user_id}: {e}")
         db.remove_active_playlist(user_id)
         return
 
@@ -2562,7 +2561,7 @@ def main():
                             # 从断点处继续播放
                             remaining = songs[current_index:]
                             logger.info(f"歌单续播：用户={user_id} 歌单={playlist_id} 进度={current_index}/{total} 剩余{len(remaining)}首")
-                            asyncio.create_task(_resume_playlist_play(user_id, playlist_id, remaining, current_index, total))
+                            asyncio.create_task(_resume_playlist_play(application, user_id, playlist_id, remaining, current_index, total))
                             # 通知用户
                             try:
                                 await application.bot.send_message(
