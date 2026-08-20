@@ -604,22 +604,46 @@ async def _show_playlist_page(update: Update, context, playlist_id: int, page: i
 
 
 async def _play_playlist_all(update: Update, context, playlist_id: int):
-    """全部播放：后台逐个发送歌单歌曲"""
+    """全部播放：后台逐个发送歌单歌曲（状态持久化到Redis，重启后继续）"""
     songs = context.user_data.get(f"playlist_{playlist_id}", [])
     if not songs:
         await update.callback_query.edit_message_text("❌ 歌单数据已过期，请重新输入 /playlist")
         return
 
     chat_id = update.callback_query.message.chat_id
+    user_id = update.callback_query.from_user.id
     await update.callback_query.edit_message_text(f"▶️ 开始全部播放 {len(songs)} 首歌曲...")
+
+    # 保存播放状态到Redis（从第0首开始）
+    db.save_active_playlist(user_id, playlist_id, songs, 0)
+    logger.info(f"歌单播放：用户={user_id} 歌单={playlist_id} 共{len(songs)}首，开始播放（状态已持久化）")
 
     async def _send_all():
         success = 0
         failed = 0
+        start_idx = 0
         for idx, song in enumerate(songs, 1):
+            # 检查管理员停止标志
+            if db.check_playlist_stop_flag(user_id):
+                logger.info(f"歌单播放：用户={user_id} 被管理员停止，已播放{idx-1}首")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
+                )
+                db.remove_active_playlist(user_id)
+                return
             # 中等优先级：最近3秒有用户活动则暂停（比缓存排行榜高，比用户单曲低）
             while time.time() - last_user_activity < 3:
                 await asyncio.sleep(2)
+                # 暂停时也检查停止标志
+                if db.check_playlist_stop_flag(user_id):
+                    logger.info(f"歌单播放：用户={user_id} 被管理员停止（暂停中），已播放{idx-1}首")
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
+                    )
+                    db.remove_active_playlist(user_id)
+                    return
             try:
                 cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
@@ -628,13 +652,15 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                         chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
                     )
                 else:
-                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
                     if not url:
                         failed += 1
+                        db.update_playlist_index(user_id, idx)
                         continue
                     resp = await asyncio.to_thread(requests_get, url, 45)
                     if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
                         failed += 1
+                        db.update_playlist_index(user_id, idx)
                         continue
                     audio_bytes = io.BytesIO(resp.content)
                     audio_bytes = _tag_mp3(audio_bytes, song)
@@ -651,17 +677,118 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
                 success += 1
+                # 更新播放进度到Redis（每首完成后更新）
+                db.update_playlist_index(user_id, idx)
             except Exception as e:
                 logger.warning(f"歌单全部播放失败 {song['name']}: {e}")
                 failed += 1
+                db.update_playlist_index(user_id, idx)
             await asyncio.sleep(1)  # 中等优先级，间隔1秒
 
+        # 播放完成，移除状态
+        db.remove_active_playlist(user_id)
+        logger.info(f"歌单播放完成：用户={user_id} 歌单={playlist_id} 成功{success}首，失败{failed}首")
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"✅ 歌单播放完成！成功{success}首，失败{failed}首。"
         )
 
     asyncio.create_task(_send_all())
+
+
+async def _resume_playlist_play(user_id: int, playlist_id: int, songs: list, start_index: int, total: int):
+    """断点续播：从指定进度继续播放歌单（服务重启后恢复）"""
+    from telegram.ext import ContextTypes
+    # 获取application的bot对象（通过全局变量或直接创建）
+    try:
+        bot = application.bot
+    except Exception:
+        logger.error(f"歌单续播：无法获取bot对象 用户={user_id}")
+        db.remove_active_playlist(user_id)
+        return
+
+    chat_id = user_id
+    success = 0
+    failed = 0
+
+    for idx_offset, song in enumerate(songs):
+        idx = start_index + idx_offset + 1  # 当前是第几首（从1开始）
+        # 检查管理员停止标志
+        if db.check_playlist_stop_flag(user_id):
+            logger.info(f"歌单续播：用户={user_id} 被管理员停止，已播放{idx-1}首")
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
+                )
+            except Exception:
+                pass
+            db.remove_active_playlist(user_id)
+            return
+        # 中等优先级：最近3秒有用户活动则暂停
+        while time.time() - last_user_activity < 3:
+            await asyncio.sleep(2)
+            if db.check_playlist_stop_flag(user_id):
+                logger.info(f"歌单续播：用户={user_id} 被管理员停止（暂停中），已播放{idx-1}首")
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
+                    )
+                except Exception:
+                    pass
+                db.remove_active_playlist(user_id)
+                return
+        try:
+            cached = db.get_file_id(song["id"])
+            caption = _song_caption(song)
+            if cached:
+                await bot.send_audio(
+                    chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
+                )
+            else:
+                url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
+                if not url:
+                    failed += 1
+                    db.update_playlist_index(user_id, idx)
+                    continue
+                resp = await asyncio.to_thread(requests_get, url, 45)
+                if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                    failed += 1
+                    db.update_playlist_index(user_id, idx)
+                    continue
+                audio_bytes = io.BytesIO(resp.content)
+                audio_bytes = _tag_mp3(audio_bytes, song)
+                msg = await bot.send_audio(
+                    chat_id=chat_id,
+                    audio=audio_bytes,
+                    filename=f"{song['name']}.mp3",
+                    title=song["name"],
+                    performer=song["artist"],
+                    caption=caption,
+                    parse_mode="HTML",
+                    duration=song["duration"] // 1000 if song["duration"] else None,
+                )
+                if msg and msg.audio and msg.audio.file_id:
+                    db.set_file_id(song["id"], msg.audio.file_id)
+            success += 1
+            db.update_playlist_index(user_id, idx)
+        except Exception as e:
+            logger.warning(f"歌单续播失败 {song['name']}: {e}")
+            failed += 1
+            db.update_playlist_index(user_id, idx)
+        await asyncio.sleep(1)
+
+    # 播放完成
+    db.remove_active_playlist(user_id)
+    logger.info(f"歌单续播完成：用户={user_id} 歌单={playlist_id} 成功{success}首，失败{failed}首")
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ 歌单播放完成！成功{success}首，失败{failed}首。"
+        )
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -710,6 +837,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML",
         )
+    elif data.startswith("stoplist:"):
+        # 管理员停止用户歌单播放
+        if not _is_admin(user.id):
+            await query.answer("⛔ 权限不足", show_alert=True)
+            return
+        target_uid = int(data.split(":", 1)[1])
+        db.set_playlist_stop_flag(target_uid)
+        # 通知被停止的用户
+        try:
+            await context.bot.send_message(target_uid, "⏹️ 您的歌单播放已被管理员停止。")
+        except Exception:
+            pass
+        await query.answer("✅ 已发送停止指令", show_alert=True)
+        await query.edit_message_text(f"✅ 已停止用户 {target_uid} 的歌单播放。")
     elif data == "cache_now":
         # 管理员立即缓存
         if not _is_admin(user.id):
@@ -1418,6 +1559,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔁 /restart — 重启Render服务（每8小时自动重启一次）\n"
         "📊 /cachetop — 预热热歌榜前100首缓存\n"
         "📋 /cacheplaylist 歌单ID — 缓存指定歌单全部歌曲\n"
+        "⏹️ /playliststop — 查看/停止正在播放歌单的用户\n"
         "♻️ /autocache — 开关闲时自动缓存\n"
         "📊 /cachestatus — 查看缓存状态\n\n"
         "👑 <b>管理员管理</b>（仅主管理员）\n"
@@ -2105,6 +2247,43 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_do_cache_playlist())
 
 
+async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：查看正在播放歌单的用户，并可停止其播放"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    active_users = db.get_active_playlist_users()
+    if not active_users:
+        await update.message.reply_text("📭 当前没有用户正在播放歌单。")
+        return
+
+    # 显示正在播放歌单的用户列表，带停止按钮
+    keyboard = []
+    info_lines = []
+    for uid in active_users:
+        data = db.get_active_playlist(uid)
+        if not data:
+            continue
+        playlist_id = data.get("playlist_id", "?")
+        current = data.get("current_index", 0)
+        total = data.get("total", 0)
+        # 获取用户名
+        try:
+            user_info = await context.bot.get_chat(uid)
+            name = user_info.first_name or str(uid)
+            if user_info.username:
+                name += f" (@{user_info.username})"
+        except Exception:
+            name = str(uid)
+        info_lines.append(f"• {name}\n  歌单ID: {playlist_id}，进度: {current}/{total}")
+        keyboard.append([InlineKeyboardButton(f"⏹️ 停止 {name}", callback_data=f"stoplist:{uid}")])
+
+    text = "📊 <b>正在播放歌单的用户</b>\n\n" + "\n\n".join(info_lines) + "\n\n点击下方按钮停止对应用户的歌单播放："
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 # ============================================================
 # 重启功能（管理员手动 + 定时自动）
 # ============================================================
@@ -2196,6 +2375,7 @@ def main():
     application.add_handler(CommandHandler("autocache", cmd_autocache))
     application.add_handler(CommandHandler("cachestatus", cmd_cachestatus))
     application.add_handler(CommandHandler("cacheplaylist", cmd_cacheplaylist))
+    application.add_handler(CommandHandler("playliststop", cmd_playlist_stop))
 
     # 管理员上传 .txt 文件设置 cookie
     application.add_handler(MessageHandler(filters.Document.ALL, handle_admin_document))
@@ -2294,13 +2474,33 @@ def main():
             asyncio.create_task(_daily_refresh())
 
             # 每小时检测cookie是否过期，每次检测后都把结果发送给管理员
+            # 断点续检：记录上次检测时间到Redis，服务重启后继续之前的周期
             async def _hourly_cookie_check():
-                # 启动后延迟2分钟第一次检测（等待服务完全启动）
-                await asyncio.sleep(120)
+                import time as _time
+                # 读取上次检测时间
+                last_check_str = db._exec("GET", "bot:last_cookie_check") if db.enabled else None
+                last_check = int(last_check_str) if last_check_str else 0
+                now = _time.time()
+                elapsed = now - last_check if last_check > 0 else 999999
+
+                if elapsed >= 3600:
+                    # 距离上次检测超过1小时，2分钟后立即检测
+                    wait_time = 120
+                    logger.info(f"Cookie检测：距离上次检测{int(elapsed)}秒，{wait_time}秒后检测")
+                else:
+                    # 距离上次检测不足1小时，等待剩余时间
+                    wait_time = 3600 - int(elapsed)
+                    logger.info(f"Cookie检测：距离上次检测{int(elapsed)}秒，{wait_time}秒后继续检测周期")
+
+                await asyncio.sleep(wait_time)
+
                 while True:
                     try:
                         logger.info("Cookie状态检测：开始检测...")
                         is_valid = await asyncio.to_thread(api.check_cookie_valid)
+                        # 记录本次检测时间
+                        if db.enabled:
+                            db._exec("SET", "bot:last_cookie_check", str(int(_time.time())))
                         if is_valid:
                             logger.info("Cookie状态检测：有效 ✅")
                             await _notify_all_admins(
@@ -2322,6 +2522,9 @@ def main():
                             )
                     except Exception as e:
                         logger.error(f"Cookie状态检测异常: {e}", exc_info=True)
+                        # 异常也记录检测时间，避免重启后立即重复检测
+                        if db.enabled:
+                            db._exec("SET", "bot:last_cookie_check", str(int(_time.time())))
                         await _notify_all_admins(
                             application,
                             f"⚠️ Cookie 状态检测异常：{e}\n\n"
@@ -2332,7 +2535,49 @@ def main():
                     await asyncio.sleep(3600)
 
             asyncio.create_task(_hourly_cookie_check())
-            logger.info("Cookie状态检测任务已启动（2分钟后首次检测，之后每小时一次）")
+            logger.info("Cookie状态检测任务已启动（断点续检，根据上次检测时间决定等待时长）")
+
+            # 启动时恢复未完成的歌单播放（断点续播）
+            async def _resume_active_playlists():
+                await asyncio.sleep(60)  # 等待服务完全启动
+                try:
+                    active_users = db.get_active_playlist_users()
+                    if not active_users:
+                        logger.info("歌单续播：无未完成的歌单播放")
+                        return
+                    logger.info(f"歌单续播：发现{len(active_users)}个未完成的歌单播放，开始恢复")
+                    for user_id in active_users:
+                        try:
+                            data = db.get_active_playlist(user_id)
+                            if not data:
+                                db.remove_active_playlist(user_id)
+                                continue
+                            playlist_id = data.get("playlist_id")
+                            songs = data.get("songs", [])
+                            current_index = data.get("current_index", 0)
+                            total = data.get("total", len(songs))
+                            if not songs or current_index >= total:
+                                db.remove_active_playlist(user_id)
+                                continue
+                            # 从断点处继续播放
+                            remaining = songs[current_index:]
+                            logger.info(f"歌单续播：用户={user_id} 歌单={playlist_id} 进度={current_index}/{total} 剩余{len(remaining)}首")
+                            asyncio.create_task(_resume_playlist_play(user_id, playlist_id, remaining, current_index, total))
+                            # 通知用户
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=user_id,
+                                    text=f"▶️ 服务已恢复，继续播放歌单（进度{current_index}/{total}，剩余{len(remaining)}首）"
+                                )
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.error(f"歌单续播失败 用户={user_id}: {e}")
+                            db.remove_active_playlist(user_id)
+                except Exception as e:
+                    logger.error(f"歌单续播任务异常: {e}")
+
+            asyncio.create_task(_resume_active_playlists())
 
             # 定时自动重启（每8小时），Render检测到进程退出后自动重启
             async def _auto_restart():

@@ -107,6 +107,72 @@ class UpstashDB:
         """设置音质（standard/higher）"""
         self._exec("SET", "bot:quality", quality)
 
+    # ---- Cookie检测时间（重启后继续检测周期）----
+    def get_last_cookie_check(self) -> int:
+        """获取上次Cookie检测时间戳"""
+        result = self._exec("GET", "bot:last_cookie_check")
+        return int(result) if result else 0
+
+    def set_last_cookie_check(self, ts: int):
+        """设置上次Cookie检测时间戳"""
+        self._exec("SET", "bot:last_cookie_check", str(ts))
+
+    # ---- 歌单播放状态（重启后继续播放）----
+    def save_active_playlist(self, user_id: int, playlist_id: int, songs: list, current_index: int = 0):
+        """保存用户正在播放的歌单状态"""
+        import json
+        data = {
+            "playlist_id": playlist_id,
+            "current_index": current_index,
+            "total": len(songs),
+            "songs": songs,
+            "start_time": int(time.time())
+        }
+        self._exec("SET", f"playlist:active:{user_id}", json.dumps(data, ensure_ascii=False), "EX", 86400)
+        self._exec("SADD", "playlist:active_users", str(user_id))
+
+    def get_active_playlist(self, user_id: int) -> dict:
+        """获取用户正在播放的歌单状态"""
+        import json
+        result = self._exec("GET", f"playlist:active:{user_id}")
+        if not result:
+            return {}
+        try:
+            return json.loads(result)
+        except Exception:
+            return {}
+
+    def update_playlist_index(self, user_id: int, current_index: int):
+        """更新歌单播放进度"""
+        import json
+        data = self.get_active_playlist(user_id)
+        if not data:
+            return
+        data["current_index"] = current_index
+        self._exec("SET", f"playlist:active:{user_id}", json.dumps(data, ensure_ascii=False), "EX", 86400)
+
+    def remove_active_playlist(self, user_id: int):
+        """移除用户的歌单播放状态（播放完成或被停止）"""
+        self._exec("DEL", f"playlist:active:{user_id}")
+        self._exec("SREM", "playlist:active_users", str(user_id))
+
+    def get_active_playlist_users(self) -> list:
+        """获取所有正在播放歌单的用户ID列表"""
+        result = self._exec("SMEMBERS", "playlist:active_users")
+        return [int(x) for x in result] if result else []
+
+    def set_playlist_stop_flag(self, user_id: int):
+        """设置停止歌单播放的标志（管理员停止用户播放）"""
+        self._exec("SET", f"playlist:stop:{user_id}", "1", "EX", 60)
+
+    def check_playlist_stop_flag(self, user_id: int) -> bool:
+        """检查是否有停止标志，并清除"""
+        exists = self._exec("EXISTS", f"playlist:stop:{user_id}")
+        if exists:
+            self._exec("DEL", f"playlist:stop:{user_id}")
+            return True
+        return False
+
     # ---- Telegram file_id 缓存（避免重复上传音频） ----
     def get_file_id(self, song_id: int) -> str:
         result = self._exec("GET", f"cache:file_id:{song_id}")
