@@ -2240,7 +2240,7 @@ def main():
 
             asyncio.create_task(_daily_refresh())
 
-            # 每小时检测cookie是否过期，过期则通知所有管理员
+            # 每小时检测cookie是否过期，每次检测后都把结果发送给管理员
             async def _hourly_cookie_check():
                 # 启动后延迟2分钟第一次检测（等待服务完全启动）
                 await asyncio.sleep(120)
@@ -2250,6 +2250,11 @@ def main():
                         is_valid = await asyncio.to_thread(api.check_cookie_valid)
                         if is_valid:
                             logger.info("Cookie状态检测：有效 ✅")
+                            await _notify_all_admins(
+                                application,
+                                "✅ 网易云 Cookie 状态检测：有效\n\n"
+                                "歌曲搜索和播放功能正常。"
+                            )
                         else:
                             logger.warning("Cookie状态检测：已过期或无效 ❌，通知所有管理员")
                             await _notify_all_admins(
@@ -2264,6 +2269,12 @@ def main():
                             )
                     except Exception as e:
                         logger.error(f"Cookie状态检测异常: {e}", exc_info=True)
+                        await _notify_all_admins(
+                            application,
+                            f"⚠️ Cookie 状态检测异常：{e}\n\n"
+                            "可能是网络问题，将在下小时重试。\n"
+                            "手动查看状态：/cookie"
+                        )
                     # 每小时检测一次
                     await asyncio.sleep(3600)
 
