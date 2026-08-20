@@ -2422,6 +2422,8 @@ def main():
             app = web.Application()
 
             async def webhook_handler(request):
+                global last_user_activity
+                last_user_activity = time.time()
                 if request.can_read_body:
                     try:
                         data = await request.json()
@@ -2435,38 +2437,6 @@ def main():
                                 # 只保留最近100个
                                 if len(_processed_update_ids) > 100:
                                     _processed_update_ids.clear()
-
-                            # 判断是否为播放请求（管理员非播放请求不算用户活动）
-                            global last_user_activity
-                            is_admin_req = False
-                            is_play_req = False
-                            user_id = None
-
-                            # 获取用户ID
-                            if update.effective_user:
-                                user_id = update.effective_user.id
-                                is_admin_req = _is_admin(user_id)
-
-                            # 判断是否为播放请求
-                            if update.message and update.message.text:
-                                text = update.message.text
-                                if text.startswith('/music') or text.startswith('/playlist'):
-                                    is_play_req = True
-                                elif text.startswith('/start play_'):
-                                    is_play_req = True
-                            elif update.inline_query:
-                                is_play_req = True
-                            elif update.chosen_inline_result:
-                                is_play_req = True
-                            elif update.callback_query and update.callback_query.data:
-                                cb_data = update.callback_query.data
-                                if cb_data.startswith('lyric:') or cb_data.startswith('plist:') or cb_data.startswith('pall:') or cb_data.startswith('pmenu:'):
-                                    is_play_req = True
-
-                            # 管理员非播放请求不更新last_user_activity
-                            if not is_admin_req or is_play_req:
-                                last_user_activity = time.time()
-
                             await application.update_queue.put(update)
                     except Exception as e:
                         logger.error(f"Webhook处理失败: {e}")
