@@ -2242,12 +2242,16 @@ def main():
 
             # 每小时检测cookie是否过期，过期则通知所有管理员
             async def _hourly_cookie_check():
+                # 启动后延迟2分钟第一次检测（等待服务完全启动）
+                await asyncio.sleep(120)
                 while True:
-                    await asyncio.sleep(3600)
                     try:
+                        logger.info("Cookie状态检测：开始检测...")
                         is_valid = await asyncio.to_thread(api.check_cookie_valid)
-                        if not is_valid:
-                            logger.warning("Cookie 已过期，通知所有管理员")
+                        if is_valid:
+                            logger.info("Cookie状态检测：有效 ✅")
+                        else:
+                            logger.warning("Cookie状态检测：已过期或无效 ❌，通知所有管理员")
                             await _notify_all_admins(
                                 application,
                                 "🚨 网易云 Cookie 已过期或无效！\n\n"
@@ -2259,9 +2263,12 @@ def main():
                                 "查看状态：/cookie"
                             )
                     except Exception as e:
-                        logger.error(f"Cookie状态检测失败: {e}")
+                        logger.error(f"Cookie状态检测异常: {e}", exc_info=True)
+                    # 每小时检测一次
+                    await asyncio.sleep(3600)
 
             asyncio.create_task(_hourly_cookie_check())
+            logger.info("Cookie状态检测任务已启动（2分钟后首次检测，之后每小时一次）")
 
             # 定时自动重启（每4小时），Render检测到进程退出后自动重启
             async def _auto_restart():
