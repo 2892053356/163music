@@ -2,6 +2,9 @@
 
 支持搜索、播放网易云音乐的 Telegram 机器人，带内联搜索、管理员功能、音质设置、Cookie自动刷新和闲时自动缓存。
 
+作者：https://t.me/xioudi_a
+bot:https://t.me/xioudi163_bot
+
 ## ✨ 功能
 
 ### 基础功能
