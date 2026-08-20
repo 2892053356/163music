@@ -1412,7 +1412,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✏️ /setcookie 值 — 手动设置 Cookie\n"
         "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
         "🔄 <b>服务管理</b>\n"
-        "🔁 /restart — 重启Render服务（每4小时自动重启一次）\n"
+        "🔁 /restart — 重启Render服务（每8小时自动重启一次）\n"
         "📊 /cachetop — 预热热歌榜前100首缓存\n"
         "📋 /cacheplaylist 歌单ID — 缓存指定歌单全部歌曲\n"
         "♻️ /autocache — 开关闲时自动缓存\n"
@@ -2293,10 +2293,10 @@ def main():
             asyncio.create_task(_hourly_cookie_check())
             logger.info("Cookie状态检测任务已启动（2分钟后首次检测，之后每小时一次）")
 
-            # 定时自动重启（每4小时），Render检测到进程退出后自动重启
+            # 定时自动重启（每8小时），Render检测到进程退出后自动重启
             async def _auto_restart():
                 while True:
-                    await asyncio.sleep(4 * 3600)
+                    await asyncio.sleep(8 * 3600)
                     try:
                         logger.info("定时自动重启触发")
                         try:
