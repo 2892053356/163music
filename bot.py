@@ -249,7 +249,7 @@ async def audio_proxy_handler(request):
     name = request.query.get("name", "未知歌曲")
     artist = request.query.get("artist", "未知艺术家")
     album = request.query.get("album", "")
-    quality = request.query.get("quality", config.MUSIC_QUALITY)
+    quality = request.query.get("quality", db.get_quality())
 
     try:
         sid = int(song_id)
@@ -961,7 +961,7 @@ async def _send_song_to_private(context, user_id: int, song_id: int):
             logger.info(f"私聊播放 用户={user_id} 歌曲={song['name']} 使用缓存file_id")
             return
         # 获取播放地址
-        url_result = await asyncio.to_thread(api.get_song_url, [song_id], level=config.MUSIC_QUALITY)
+        url_result = await asyncio.to_thread(api.get_song_url, [song_id], level=db.get_quality())
         url = None
         for item in url_result.get("data", []):
             if item.get("id") == song_id:
@@ -1356,7 +1356,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
 
     # 获取播放地址并缓存
     try:
-        url_result = await asyncio.to_thread(api.get_song_url, [song_id], level=config.MUSIC_QUALITY)
+        url_result = await asyncio.to_thread(api.get_song_url, [song_id], level=db.get_quality())
         url = None
         for item in url_result.get("data", []):
             if item.get("id") == song_id:
@@ -1411,6 +1411,9 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔄 /refreshcookie — 手动刷新 Cookie\n"
         "✏️ /setcookie 值 — 手动设置 Cookie\n"
         "📎 也可直接上传 .txt 文件或粘贴长文本自动设置\n\n"
+        "🎵 <b>音质设置</b>\n"
+        "📋 /quality — 查看当前音质\n"
+        "✏️ /setquality standard|higher — 设置音质（普通VIP支持standard/higher）\n\n"
         "🔄 <b>服务管理</b>\n"
         "🔁 /restart — 重启Render服务（每8小时自动重启一次）\n"
         "📊 /cachetop — 预热热歌榜前100首缓存\n"
@@ -1423,6 +1426,42 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 /admins — 查看管理员列表"
     )
     await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def cmd_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员查看当前音质"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    quality = db.get_quality()
+    quality_name = {"standard": "标准", "higher": "较高", "exhigh": "极高", "lossless": "无损"}.get(quality, quality)
+    await update.message.reply_text(
+        f"🎵 当前音质：<b>{quality}</b>（{quality_name}）\n\n"
+        f"可用音质：\n"
+        f"• standard — 标准（免费）\n"
+        f"• higher — 较高（普通VIP）\n\n"
+        f"设置：/setquality standard|higher",
+        parse_mode="HTML"
+    )
+
+
+async def cmd_setquality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员设置音质"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/setquality standard|higher")
+        return
+    quality = context.args[0].strip().lower()
+    if quality not in ("standard", "higher"):
+        await update.message.reply_text("⚠️ 音质必须是 standard 或 higher（普通VIP支持这两种）")
+        return
+    db.set_quality(quality)
+    quality_name = {"standard": "标准", "higher": "较高"}.get(quality, quality)
+    await update.message.reply_text(f"✅ 音质已设置为 <b>{quality}</b>（{quality_name}）", parse_mode="HTML")
 
 
 async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1514,7 +1553,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚫 封禁用户数：{len(banned)}\n"
         f"🔍 总搜索次数：{stats.get('total_searches', 0)}\n"
         f"▶️ 总播放次数：{stats.get('total_plays', 0)}\n"
-        f"🎵 当前音质：{config.MUSIC_QUALITY}"
+        f"🎵 当前音质：{db.get_quality()}"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -2150,6 +2189,8 @@ def main():
     application.add_handler(CommandHandler("cookie", cmd_cookie))
     application.add_handler(CommandHandler("setcookie", cmd_setcookie))
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
+    application.add_handler(CommandHandler("quality", cmd_quality))
+    application.add_handler(CommandHandler("setquality", cmd_setquality))
     application.add_handler(CommandHandler("restart", cmd_restart))
     application.add_handler(CommandHandler("cachetop", cmd_cachetop))
     application.add_handler(CommandHandler("autocache", cmd_autocache))
@@ -2182,7 +2223,7 @@ def main():
 
     print("✅ Bot 已启动")
     print(f"👑 管理员 ID: {config.ADMIN_ID}")
-    print(f"🎵 音质等级: {config.MUSIC_QUALITY}")
+    print(f"🎵 音质等级: {db.get_quality()}")
     print(f"💾 Upstash 数据库: {'已连接' if db.enabled else '未配置（数据仅内存）'}")
     print("=" * 50)
 

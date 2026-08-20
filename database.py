@@ -97,6 +97,16 @@ class UpstashDB:
         result = self._exec("GET", "bot:cookie_updated_at")
         return int(result) if result else 0
 
+    # ---- 音质设置 ----
+    def get_quality(self) -> str:
+        """获取当前音质设置，默认standard"""
+        result = self._exec("GET", "bot:quality")
+        return result if result else "standard"
+
+    def set_quality(self, quality: str):
+        """设置音质（standard/higher）"""
+        self._exec("SET", "bot:quality", quality)
+
     # ---- Telegram file_id 缓存（避免重复上传音频） ----
     def get_file_id(self, song_id: int) -> str:
         result = self._exec("GET", f"cache:file_id:{song_id}")
@@ -114,6 +124,26 @@ class UpstashDB:
 
     def set_file_id(self, song_id: int, file_id: str):
         self._exec("SET", f"cache:file_id:{song_id}", file_id)
+
+    # ---- 用户搜索历史（用于闲时缓存扩展） ----
+    def add_searched_song(self, song_id: int):
+        """记录用户搜索过的歌曲ID"""
+        self._exec("SADD", "cache:searched_songs", str(song_id))
+
+    def get_uncached_searched_songs(self, limit: int = 100) -> list:
+        """获取用户搜索过但未缓存的歌曲ID列表"""
+        all_searched = self._exec("SMEMBERS", "cache:searched_songs") or []
+        uncached = []
+        for sid_str in all_searched:
+            try:
+                sid = int(sid_str)
+                if not self.get_file_id(sid):
+                    uncached.append(sid)
+                    if len(uncached) >= limit:
+                        break
+            except (ValueError, TypeError):
+                continue
+        return uncached
 
     def clear_all_file_ids(self) -> int:
         """清除所有file_id缓存，返回删除数量"""
