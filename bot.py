@@ -279,24 +279,36 @@ async def audio_proxy_handler(request):
                 continue
             if play_url.startswith("http://"):
                 play_url = "https://" + play_url[7:]
-            try:
-                resp = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _download_session.get, play_url,
-                        timeout=(8, 25),
-                        headers={"Referer": "https://music.163.com/"}
-                    ),
-                    timeout=33
-                )
-                if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
-                    audio_content = resp.content
-                    logger.info(f"代理端点 song_id={sid} 音质={try_quality} 下载成功 大小={len(audio_content)}bytes")
-                    break
-                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
-            except asyncio.TimeoutError:
-                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载超时")
-            except Exception as e:
-                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 异常: {type(e).__name__}: {e}")
+            # 每种音质重试1次，连接超时15秒，读取超时30秒，总超时45秒
+            for _retry in range(2):
+                try:
+                    resp = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _download_session.get, play_url,
+                            timeout=(15, 30),
+                            headers={"Referer": "https://music.163.com/"}
+                        ),
+                        timeout=45
+                    )
+                    if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
+                        audio_content = resp.content
+                        _retry_info = f" (第{_retry+1}次尝试)" if _retry > 0 else ""
+                        logger.info(f"代理端点 song_id={sid} 音质={try_quality} 下载成功{_retry_info} 大小={len(audio_content)}bytes")
+                        break
+                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
+                except asyncio.TimeoutError:
+                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载超时 (第{_retry+1}次尝试)")
+                    if _retry == 0:
+                        await asyncio.sleep(1)
+                        continue
+                except Exception as e:
+                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 异常: {type(e).__name__}: {e}")
+                    if _retry == 0:
+                        await asyncio.sleep(1)
+                        continue
+                break  # 非超时异常或成功，跳出重试循环
+            if audio_content:
+                break
 
         if not audio_content:
             return web.Response(status=502, text="Audio download failed")
