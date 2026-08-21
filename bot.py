@@ -541,7 +541,29 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text(f"🔍 正在获取歌单 {playlist_id} ...")
 
     try:
-        songs = await asyncio.to_thread(api.get_toplist_songs, playlist_id, PLAYLIST_MAX_SONGS)
+        # 先获取歌单总歌曲数
+        total_count = await asyncio.to_thread(api.get_playlist_track_count, playlist_id)
+        logger.info(f"/playlist 歌单ID={playlist_id} 总歌曲数={total_count}")
+
+        if total_count <= PLAYLIST_MAX_SONGS:
+            # 不超过1000首，直接获取
+            songs = await asyncio.to_thread(api.get_toplist_songs, playlist_id, PLAYLIST_MAX_SONGS)
+        else:
+            # 超过1000首，分批加载
+            await status.edit_text(f"📚 歌单共 {total_count} 首，正在分批加载（每批{PLAYLIST_MAX_SONGS}首）...")
+            songs = []
+            offset = 0
+            batch_num = 0
+            while offset < total_count:
+                batch_num += 1
+                batch = await asyncio.to_thread(api.get_toplist_songs, playlist_id, PLAYLIST_MAX_SONGS, offset)
+                if not batch:
+                    break
+                songs.extend(batch)
+                logger.info(f"/playlist 分批加载 第{batch_num}批 offset={offset} 获取{len(batch)}首 累计{len(songs)}/{total_count}")
+                await status.edit_text(f"📚 歌单共 {total_count} 首，已加载 {len(songs)}/{total_count} 首（第{batch_num}批）...")
+                offset += PLAYLIST_MAX_SONGS
+                await asyncio.sleep(0.5)  # 避免请求过快
     except Exception as e:
         logger.error(f"获取歌单失败: {e}")
         await status.edit_text("❌ 获取歌单失败，请检查歌单ID是否正确。")

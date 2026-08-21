@@ -197,16 +197,17 @@ class NeteaseAPI:
     # ----------------------------------------------------------
     # 排行榜
     # ----------------------------------------------------------
-    def get_toplist_songs(self, playlist_id: int = 3778678, limit: int = 100) -> list:
+    def get_toplist_songs(self, playlist_id: int = 3778678, limit: int = 100, offset: int = 0) -> list:
         """
         获取排行榜歌曲（默认云音乐热歌榜 3778678）
         返回精简列表，同 search_songs_simple 格式
+        支持分页：offset 为起始位置
         """
         path = "/weapi/v6/playlist/detail"
         data = {"id": playlist_id, "n": 1000, "s": 0}
         result = self._post(path, data)
         playlist = result.get("playlist", {})
-        track_ids = [t["id"] for t in playlist.get("trackIds", [])][:limit]
+        track_ids = [t["id"] for t in playlist.get("trackIds", [])][offset:offset+limit]
         if not track_ids:
             return []
         # 批量获取歌曲详情
@@ -226,6 +227,17 @@ class NeteaseAPI:
                 "duration": s.get("dt", 0),
             })
         return simple_list
+
+    def get_playlist_track_count(self, playlist_id: int) -> int:
+        """获取歌单总歌曲数"""
+        try:
+            path = "/weapi/v6/playlist/detail"
+            data = {"id": playlist_id, "n": 1, "s": 0}
+            result = self._post(path, data)
+            playlist = result.get("playlist", {})
+            return playlist.get("trackCount", 0) or len(playlist.get("trackIds", []))
+        except Exception:
+            return 0
 
     # ----------------------------------------------------------
     # Cookie 管理
