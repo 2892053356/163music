@@ -926,6 +926,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         target_uid = int(data.split(":", 1)[1])
         db.set_playlist_stop_flag(target_uid)
+        # 立即释放锁，避免用户无法立即重新播放（播放任务检测到停止标志后会退出）
+        if db.enabled:
+            db.release_playlist_lock(target_uid)
         # 通知被停止的用户
         try:
             await context.bot.send_message(target_uid, "⏹️ 您的歌单播放已被管理员停止。")
@@ -1099,12 +1102,18 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
 
     caption = _song_caption(song)
 
-    # 仅在私聊中显示歌词按钮
+    # 私聊显示歌词按钮，群组显示"在bot中播放"按钮
     chat = update.effective_chat
     reply_markup = None
     if chat and chat.type == "private":
         reply_markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("📝 获取歌词", callback_data=f"lyric:{song_id}")
+        ]])
+    elif chat and chat.type in ("group", "supergroup"):
+        # 群组中显示"在bot中播放"按钮（deep link 跳转到bot私聊自动播放）
+        play_url = f"https://t.me/{config.BOT_USERNAME}?start=play_{song_id}"
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🎵 在bot中播放", url=play_url)
         ]])
 
     # 检查 file_id 缓存，命中则直接转发（零带宽、秒发）

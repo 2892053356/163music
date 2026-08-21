@@ -7,6 +7,12 @@ import os
 # Telegram Bot Token
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
+# Telegram Bot 用户名（不含@），用于构造 deep link
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "XiOuDi163_bot")
+
+# Telegram Bot 用户名（不含@，用于deep link）
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "XiOuDi163_bot")
+
 # 网易云 MUSIC_U cookie
 NETEASE_COOKIE = os.environ.get("NETEASE_COOKIE", "")
 
