@@ -3,7 +3,8 @@ Telegram 网易云音乐机器人
 功能：
   - /start  开始使用
   - /help   帮助
-  - /music <关键词>  搜索歌曲（按钮选择播放）
+  - /play <关键词>  搜索歌曲（按钮选择播放）
+  - /playlist <歌单ID/链接>  播放网易云歌单（仅私聊）
   - 内联搜索：@机器人用户名 <关键词>
   - 管理员：/admin /broadcast /stats /ban /unban
 """
@@ -371,11 +372,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 无自定义欢迎语时，显示默认问候 + 帮助菜单
     help_menu = (
         "\n\n📖 <b>使用方法：</b>\n"
-        "1️⃣ /music 歌曲名 — 搜索并播放歌曲\n"
-        "2️⃣ /playlist 歌单ID/链接 — 播放网易云歌单\n"
+        "1️⃣ /play 歌曲名 — 搜索并播放歌曲\n"
+        "2️⃣ /playlist 歌单ID/链接 — 播放网易云歌单（仅私聊）\n"
         "3️⃣ 内联搜索：在任意聊天输入 <code>@本机器人用户名 歌曲名</code>\n\n"
         "💡 示例：\n"
-        "• /music 邓紫棋 泡沫\n"
+        "• /play 邓紫棋 泡沫\n"
         "• /playlist 3778678\n"
         "• @XiOuDi163_bot 句号\n\n"
         "输入 /help 查看更多帮助"
@@ -393,8 +394,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 <b>帮助文档</b>\n\n"
         "🎵 <b>搜索与播放</b>\n"
-        "• /music 关键词 — 搜索歌曲\n"
-        "• /playlist 歌单ID/链接 — 播放网易云歌单\n"
+        "• /play 关键词 — 搜索歌曲\n"
+        "• /playlist 歌单ID/链接 — 播放网易云歌单（仅私聊）\n"
         "• 内联模式：@机器人用户名 关键词 — 在任意对话中搜索分享\n\n"
         "🔧 <b>其他</b>\n"
         "• /start — 开始\n"
@@ -409,7 +410,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
-async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if _is_banned(user.id):
         await update.message.reply_text("⛔ 你已被管理员封禁。")
@@ -417,12 +418,12 @@ async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyword = " ".join(context.args).strip()
     if not keyword:
-        await update.message.reply_text("⚠️ 请输入搜索关键词，例如：/music 周杰伦 晴天")
+        await update.message.reply_text("⚠️ 请输入搜索关键词，例如：/play 周杰伦 晴天")
         return
 
     _register_user(user.id)
     user_label = f"{user.username or user.first_name or user.id}"
-    logger.info(f"/music 用户={user_label}(id={user.id}) 关键词='{keyword}'")
+    logger.info(f"/play 用户={user_label}(id={user.id}) 关键词='{keyword}'")
     await _do_search(update, context, keyword)
 
 
@@ -519,10 +520,16 @@ def _extract_playlist_id(text: str) -> int:
 
 
 async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/playlist 歌单ID或链接 — 显示歌单，选择列表播放或全部播放"""
+    """/playlist 歌单ID或链接 — 显示歌单，选择列表播放或全部播放（仅私聊有效）"""
     user = update.effective_user
     if _is_banned(user.id):
         await update.message.reply_text("⛔ 你已被管理员封禁。")
+        return
+
+    # 仅在私聊中有效
+    chat = update.effective_chat
+    if chat.type != "private":
+        await update.message.reply_text("⚠️ 此命令仅在与bot私信中有效，请在私聊中使用 /playlist")
         return
 
     arg = " ".join(context.args).strip()
@@ -1608,9 +1615,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             InlineQueryResultArticle(
                 id="no_result",
                 title=f"「{keyword}」暂无可用结果",
-                description="换个关键词试试，或用 /music 搜索",
+                description="换个关键词试试，或用 /play 搜索",
                 input_message_content=InputTextMessageContent(
-                    f"😢 「{keyword}」暂无可用结果。\n💡 试试用 /music {keyword} 搜索播放"
+                    f"😢 「{keyword}」暂无可用结果。\n💡 试试用 /play {keyword} 搜索播放"
                 ),
             )
         )
@@ -2095,7 +2102,7 @@ async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "可用 <code>{username}</code> 表示用户昵称。\n\n"
             "示例：\n"
             "/setwelcome 👋 你好，{username}！\n"
-            "发送 /music 歌曲名 开始听歌"
+            "发送 /play 歌曲名 开始听歌"
         )
         return
 
@@ -2676,7 +2683,8 @@ def main():
     # 命令
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(CommandHandler("music", cmd_music))
+    application.add_handler(CommandHandler("play", cmd_play))
+    application.add_handler(CommandHandler("music", cmd_play))  # 兼容旧命令
     application.add_handler(CommandHandler("playlist", cmd_playlist))
     application.add_handler(CommandHandler("admin", cmd_admin))
     application.add_handler(CommandHandler("addadmin", cmd_add_admin))

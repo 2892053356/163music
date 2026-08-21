@@ -46,10 +46,10 @@ DEFAULT_WELCOME = os.environ.get("DEFAULT_WELCOME", """👋 你好，{username}
 有任何建议可以给我留言
 
 📖 使用方法：
-1.   /music 关键词 — 搜索歌曲
+1.   /play 关键词 — 搜索歌曲
 2.  内联搜索：在任意聊天输入 @XiOuDi163music 歌曲名
-3.  /playlist 歌单ID/链接 — 播放网易云歌单
+3.  /playlist 歌单ID/链接 — 播放网易云歌单（仅私聊）
 
 例如 
-/music 邓紫棋 泡沫
+/play 邓紫棋 泡沫
 @XiOuDi163_bot 邓紫棋 泡沫""")
