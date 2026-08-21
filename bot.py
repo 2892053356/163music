@@ -1397,7 +1397,20 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.warning("内联搜索 file_id批量查询超时，全部使用代理URL")
         file_id_map = {}
 
-    # 构建结果：已缓存用CachedAudio秒发，未缓存用Render代理URL（Telegram可访问onrender.com）
+    # 批量获取未缓存歌曲的网易云直接URL（Telegram直接下载，不经过服务器，节省出站带宽）
+    uncached_ids = [song["id"] for song in valid_songs if not (file_id_map.get(song["id"]) and str(file_id_map.get(song["id"])).strip())]
+    netease_url_map = {}
+    if uncached_ids:
+        try:
+            url_result = await asyncio.to_thread(api.get_song_url, uncached_ids, level=db.get_quality())
+            for item in url_result.get("data", []):
+                if item.get("url"):
+                    netease_url_map[item["id"]] = item["url"]
+            logger.info(f"内联搜索 网易云直接URL获取: {len(netease_url_map)}/{len(uncached_ids)} 首")
+        except Exception as e:
+            logger.warning(f"内联搜索 网易云直接URL获取失败: {e}")
+
+    # 构建结果：已缓存用CachedAudio秒发，未缓存优先用网易云直接URL（节省带宽）
     from urllib.parse import quote
     results = []
     for song in valid_songs:
@@ -1429,25 +1442,42 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             )
         else:
-            # 未缓存：使用Render代理端点（Telegram→Render→CDN，稳定可靠）
-            cover_param = ""
-            _cover = song.get("cover") or song.get("picUrl") or song.get("album_pic") or (song.get("al") or {}).get("picUrl")
-            if _cover:
-                cover_param = f"&cover={quote(_cover, safe='')}"
-            proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
-            logger.info(f"内联结果 Render代理歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
-            results.append(
-                InlineQueryResultAudio(
-                    id=f"url_{song['id']}",
-                    audio_url=proxy_url,
-                    title=song["name"],
-                    performer=song["artist"],
-                    audio_duration=song["duration"] // 1000 if song.get("duration") else None,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=play_private_btn,
+            # 未缓存：优先使用网易云直接URL（Telegram直接下载，不经过服务器，节省带宽）
+            netease_url = netease_url_map.get(song["id"])
+            if netease_url:
+                logger.info(f"内联结果 网易云直传歌曲 {song['name']} url长度={len(netease_url)}")
+                results.append(
+                    InlineQueryResultAudio(
+                        id=f"netease_{song['id']}",
+                        audio_url=netease_url,
+                        title=song["name"],
+                        performer=song["artist"],
+                        audio_duration=song["duration"] // 1000 if song.get("duration") else None,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=play_private_btn,
+                    )
                 )
-            )
+            else:
+                # 网易云URL获取失败，回退到代理URL
+                cover_param = ""
+                _cover = song.get("cover") or song.get("picUrl") or song.get("album_pic") or (song.get("al") or {}).get("picUrl")
+                if _cover:
+                    cover_param = f"&cover={quote(_cover, safe='')}"
+                proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
+                logger.info(f"内联结果 代理回退歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
+                results.append(
+                    InlineQueryResultAudio(
+                        id=f"url_{song['id']}",
+                        audio_url=proxy_url,
+                        title=song["name"],
+                        performer=song["artist"],
+                        audio_duration=song["duration"] // 1000 if song.get("duration") else None,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=play_private_btn,
+                    )
+                )
 
     if not results:
         results.append(
@@ -1473,12 +1503,14 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     chosen = update.chosen_inline_result
     if not chosen or not chosen.result_id:
         return
-    # 未缓存歌曲的result_id以 "cf_" (CF代理) 或 "url_" (Render代理) 开头
+    # 未缓存歌曲的result_id以 "cf_" (CF代理)、"url_" (代理) 或 "netease_" (网易云直传) 开头
     rid = chosen.result_id
     if rid.startswith("cf_"):
         song_id_str = rid[3:]
     elif rid.startswith("url_"):
         song_id_str = rid[4:]
+    elif rid.startswith("netease_"):
+        song_id_str = rid[8:]
     else:
         return
     try:
