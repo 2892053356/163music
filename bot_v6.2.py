@@ -72,13 +72,84 @@ from netease_api import NeteaseAPI
 from database import db
 
 # ============================================================
-# 日志
+# 日志配置（rich 美化输出，未安装则回退普通格式）
 # ============================================================
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+try:
+    from rich.logging import RichHandler
+    from rich.console import Console
+    from rich import print as rprint
+
+    _console = Console()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(
+            console=_console,
+            rich_tracebacks=True,
+            show_path=False,
+            markup=True,
+        )]
+    )
+    _USE_RICH = True
+    logger = logging.getLogger("rich")
+except ImportError:
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+    )
+    _USE_RICH = False
+    _console = None
+    logger = logging.getLogger(__name__)
+
+
+def _print_banner():
+    """打印启动横幅"""
+    if not _USE_RICH:
+        print("=" * 50)
+        print("  网易云音乐 Telegram Bot v7.3")
+        print("=" * 50)
+        return
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.table import Table
+
+    banner = Text()
+    banner.append("🎵 网易云音乐 Telegram Bot\n", style="bold magenta")
+    banner.append("   v7.3 - 本地部署优化版", style="cyan")
+
+    _console.print(Panel(banner, border_style="magenta", padding=(1, 4)))
+
+    # 配置信息表格
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold cyan")
+    table.add_column(style="white")
+    table.add_row("🤖 Bot Token", f"{config.BOT_TOKEN[:10]}...{config.BOT_TOKEN[-4:]}" if config.BOT_TOKEN else "未配置")
+    table.add_row("👑 管理员 ID", str(config.ADMIN_ID))
+    table.add_row("🎵 音质等级", config.MUSIC_QUALITY)
+    table.add_row("💾 数据库类型", config.DB_TYPE)
+    table.add_row("🌐 Webhook URL", config.WEBHOOK_URL or "未配置")
+    table.add_row("🔊 监听端口", str(config.PORT))
+    _console.print(table)
+    _console.print()
+
+
+def _log_status(message: str, style: str = "info"):
+    """美化状态输出"""
+    if not _USE_RICH:
+        print(f"[{style.upper()}] {message}")
+        return
+    style_map = {
+        "info": "cyan",
+        "success": "bold green",
+        "warning": "bold yellow",
+        "error": "bold red",
+        "cache": "magenta",
+        "play": "green",
+        "search": "blue",
+    }
+    color = style_map.get(style, "white")
+    _console.print(f"[{color}]{message}[/{color}]")
 
 # ============================================================
 # 全局实例
@@ -89,6 +160,10 @@ api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
 last_user_activity = 0
 inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
 _processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
+
+# 搜索播放活动集合（优先级控制：用户搜索播放时暂停歌单播放）
+# 内联搜索 > 普通搜索 > 歌单播放 > 闲时缓存
+active_search_plays = set()  # 当前正在进行搜索播放的用户ID集合
 
 # 闲时自动缓存状态
 auto_cache_running = False  # 是否正在执行自动缓存
@@ -676,7 +751,8 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 db.remove_active_playlist(user_id)
                 return
             # 中等优先级：最近3秒有用户活动则暂停（比缓存排行榜高，比用户单曲低）
-            while time.time() - last_user_activity < 3:
+            # 高优先级：有用户正在搜索播放时暂停（内联搜索 > 普通搜索 > 歌单播放）
+            while time.time() - last_user_activity < 3 or active_search_plays:
                 await asyncio.sleep(2)
                 # 暂停时也检查停止标志
                 if db.check_playlist_stop_flag(user_id):
@@ -945,6 +1021,10 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     user_label = f"{user.username or user.first_name or user.id}"
     logger.info(f"播放歌曲 用户={user_label}(id={user.id}) song_id={song_id}")
 
+    # 标记搜索播放活动（优先级：搜索播放 > 歌单播放）
+    global active_search_plays
+    active_search_plays.add(user.id)
+
     # 获取 chat_id 和 message_thread_id（支持话题群组）
     if edit:
         chat_id = update.callback_query.message.chat_id
@@ -962,6 +1042,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 await update.callback_query.edit_message_text("❌ 未找到该歌曲信息。")
             else:
                 await update.message.reply_text("❌ 未找到该歌曲信息。")
+            active_search_plays.discard(user.id)
             return
 
         sd = songs_detail[0]
@@ -977,6 +1058,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         logger.error(f"获取歌曲详情失败: {e}")
         if edit:
             await update.callback_query.edit_message_text("❌ 获取歌曲信息失败。")
+        active_search_plays.discard(user.id)
         return
 
     # 获取播放地址
@@ -992,6 +1074,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             await update.callback_query.edit_message_text(msg, parse_mode="HTML")
         else:
             await update.message.reply_text(msg, parse_mode="HTML")
+        active_search_plays.discard(user.id)
         return
 
     db.incr_play()
@@ -1026,6 +1109,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             )
             if edit:
                 await update.callback_query.delete_message()
+            active_search_plays.discard(user.id)
             return
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退下载: {e}")
@@ -1055,6 +1139,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
             else:
                 await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
+            active_search_plays.discard(user.id)
             return
 
     try:
@@ -1086,6 +1171,9 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             await update.message.reply_text(
                 "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
             )
+    finally:
+        # 清除搜索播放活动标志
+        active_search_plays.discard(user.id)
 
 
 # 共享下载Session（连接复用）+ 重试适配器
@@ -1498,10 +1586,24 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户选择内联结果后触发：未缓存歌曲自动缓存"""
+    """用户选择内联结果后触发：未缓存歌曲自动缓存 + 标记搜索播放活动"""
     chosen = update.chosen_inline_result
     if not chosen or not chosen.result_id:
         return
+
+    user = chosen.from_user
+    user_label = f"{user.username or user.first_name or user.id}"
+
+    # 标记内联搜索播放活动（优先级最高：内联搜索 > 普通搜索 > 歌单播放）
+    global active_search_plays
+    active_search_plays.add(user.id)
+
+    # 后台延迟清除标志（内联音频发送通常在几秒内完成，10秒后恢复歌单播放）
+    async def _clear_inline_flag():
+        await asyncio.sleep(10)
+        active_search_plays.discard(user.id)
+    asyncio.create_task(_clear_inline_flag())
+
     # 未缓存歌曲的result_id以 "cf_" (CF代理) 或 "url_" (Render代理) 开头
     rid = chosen.result_id
     if rid.startswith("cf_"):
@@ -1515,8 +1617,6 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     except ValueError:
         return
 
-    user = chosen.from_user
-    user_label = f"{user.username or user.first_name or user.id}"
     logger.info(f"内联选择 用户={user_label}(id={user.id}) song_id={song_id} query='{chosen.query}'")
 
     # 检查是否已缓存
@@ -2528,9 +2628,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 def main():
-    print("=" * 50)
-    print("  🎵 网易云音乐 Telegram Bot 启动中...")
-    print("=" * 50)
+    # 打印美化启动横幅
+    _print_banner()
 
     # 构建 Application，设置长超时（上传音频需要较长的 write_timeout）
     builder = ApplicationBuilder().token(config.BOT_TOKEN)
@@ -2541,7 +2640,7 @@ def main():
         pool_timeout=30.0,
     )
     if config.PROXY_URL:
-        print(f"🌐 使用代理: {config.PROXY_URL}")
+        _log_status(f"🌐 使用代理: {config.PROXY_URL}", "info")
         request_kwargs["proxy"] = config.PROXY_URL
     request = HTTPXRequest(**request_kwargs)
     builder = builder.request(request)
