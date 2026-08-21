@@ -1,0 +1,53 @@
+# 环境变量
+.env
+.env.local
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist/
+build/
+.eggs/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+bot.log*
+cf_tunnel*.log
+monitor.log
+
+# 本地数据库
+*.db
+*.sqlite
+*.sqlite3
+
+# 本地部署工具（不需要提交到仓库）
+ngrok.exe
+cloudflared.exe
+*.bat
+*.ps1
+*.lnk
+*.zip
+
+# Docker
+.dockerignore
+
+# 其他
+render.yaml
+Procfile

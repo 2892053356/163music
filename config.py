@@ -7,12 +7,6 @@ import os
 # Telegram Bot Token
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Telegram Bot 用户名（不含@），用于构造 deep link
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "XiOuDi163_bot")
-
-# Telegram Bot 用户名（不含@，用于deep link）
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "XiOuDi163_bot")
-
 # 网易云 MUSIC_U cookie
 NETEASE_COOKIE = os.environ.get("NETEASE_COOKIE", "")
 
@@ -40,12 +34,15 @@ CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "https://cf-music-proxy.l289205335
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", os.environ.get("RENDER_EXTERNAL_URL", ""))
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Upstash Redis（免费版，用于数据持久化）
+# 数据库类型：sqlite（本地，默认）或 upstash（云端Redis）
+DB_TYPE = os.environ.get("DB_TYPE", "sqlite")
+
+# Upstash Redis（云端部署用，DB_TYPE=upstash 时需要）
 # 在 upstash.com 创建 Redis 后，在 Details 页面获取 REST URL 和 Token
 UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
-# 默认欢迎语（可通过管理员 /setwelcome 运行时修改，持久化到 Upstash）
+# 默认欢迎语（可通过管理员 /setwelcome 运行时修改，持久化到数据库）
 DEFAULT_WELCOME = os.environ.get("DEFAULT_WELCOME", """👋 你好，{username}
 
 此bot由西欧帝制作 @XiOuDi_A 
@@ -54,7 +51,7 @@ DEFAULT_WELCOME = os.environ.get("DEFAULT_WELCOME", """👋 你好，{username}
 📖 使用方法：
 1.   /play 关键词 — 搜索歌曲
 2.  内联搜索：在任意聊天输入 @XiOuDi163music 歌曲名
-3.  /playlist 歌单ID/链接 — 播放网易云歌单（仅私聊）
+3.  /playlist 歌单ID/链接 — 播放网易云歌单（仅限私聊）
 
 例如 
 /play 邓紫棋 泡沫
