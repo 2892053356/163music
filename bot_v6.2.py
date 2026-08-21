@@ -1847,13 +1847,13 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         asyncio.create_task(_dec_inline_active())
         return
 
-    # 防抖：纯字母输入（4-8位等待300ms防抖，期间有新输入则跳过）- 优化：从800ms减少到300ms
+    # 防抖：纯字母输入（4-8位等待100ms防抖，期间有新输入则跳过）- 优化：从300ms减少到100ms
     is_pure_letters = keyword.isascii() and any(c.isalpha() for c in keyword) and not any(c.isspace() for c in keyword) and not any(c.isdigit() for c in keyword)
 
     query_time = time.time()
     inline_last_query[user.id] = (keyword, query_time)
     if is_pure_letters and len(keyword) <= 8:
-        await asyncio.sleep(0.3)  # 优化：从0.8秒减少到0.3秒
+        await asyncio.sleep(0.1)  # 优化：从0.3秒减少到0.1秒
         latest = inline_last_query.get(user.id)
         if not latest or latest[1] != query_time or latest[0] != keyword:
             logger.info(f"内联防抖 跳过旧查询 '{keyword}'")
@@ -1868,7 +1868,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if clean_keyword != keyword:
         logger.info(f"内联搜索 关键词清洗: '{keyword}' -> '{clean_keyword}'")
 
-    # 优化：搜索结果缓存（Upstash，60秒过期），重复搜索瞬间返回
+    # 优化：搜索结果缓存（Upstash，5分钟过期），重复搜索瞬间返回
     search_cache_key = f"inline_search:{clean_keyword.lower()}"
     cached_songs = []
     try:
@@ -1919,13 +1919,13 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.info(f"内联搜索 尝试原始关键词: '{keyword}' (剩余{remaining:.1f}s)")
                 songs = await _do_search(keyword, remaining)
 
-        # 写入缓存（60秒过期）
+        # 写入缓存（5分钟过期）
         if songs:
             try:
                 import json
                 db._exec("SET", search_cache_key, json.dumps(songs, ensure_ascii=False))
-                db._exec("EXPIRE", search_cache_key, 60)
-                logger.info(f"内联搜索缓存写入: keyword='{clean_keyword}' 结果数={len(songs)} 过期=60秒")
+                db._exec("EXPIRE", search_cache_key, 300)
+                logger.info(f"内联搜索缓存写入: keyword='{clean_keyword}' 结果数={len(songs)} 过期=5分钟")
             except Exception as e:
                 logger.warning(f"内联搜索缓存写入失败: {e}")
 
