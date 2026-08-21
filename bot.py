@@ -1047,6 +1047,13 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     user = update.effective_user
     user_label = f"{user.username or user.first_name or user.id}"
     logger.info(f"播放歌曲 用户={user_label}(id={user.id}) song_id={song_id}")
+
+    # 获取话题ID（话题群组中在对应话题发送）
+    message_thread_id = None
+    if edit and update.callback_query and update.callback_query.message:
+        message_thread_id = update.callback_query.message.message_thread_id
+    elif not edit and update.message:
+        message_thread_id = update.message.message_thread_id
     # 获取歌曲详情
     try:
         detail = api.get_song_detail([song_id])
@@ -1111,6 +1118,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                     caption=caption,
                     parse_mode="HTML",
                     reply_markup=reply_markup,
+                    message_thread_id=message_thread_id,
                 )
                 await update.callback_query.delete_message()
             else:
@@ -1120,6 +1128,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                     caption=caption,
                     parse_mode="HTML",
                     reply_markup=reply_markup,
+                    message_thread_id=message_thread_id,
                 )
             return
         except Exception as e:
@@ -1165,6 +1174,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 thumbnail=song["cover"] if song["cover"] else None,
                 duration=song["duration"] // 1000 if song["duration"] else None,
                 reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
             )
             await update.callback_query.delete_message()
         else:
@@ -1179,6 +1189,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 thumbnail=song["cover"] if song["cover"] else None,
                 duration=song["duration"] // 1000 if song["duration"] else None,
                 reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
             )
         # 发送成功后保存 file_id 到缓存
         if msg and msg.audio and msg.audio.file_id:
