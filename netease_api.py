@@ -199,21 +199,35 @@ class NeteaseAPI:
     # ----------------------------------------------------------
     def get_toplist_songs(self, playlist_id: int = 3778678, limit: int = 100) -> list:
         """
-        获取排行榜歌曲（默认云音乐热歌榜 3778678）
+        获取排行榜/歌单歌曲（默认云音乐热歌榜 3778678）
+        超过500首时分批获取歌曲详情，避免API超时
         返回精简列表，同 search_songs_simple 格式
         """
         path = "/weapi/v6/playlist/detail"
-        data = {"id": playlist_id, "n": 1000, "s": 0}
+        data = {"id": playlist_id, "n": 10000, "s": 0}
         result = self._post(path, data)
         playlist = result.get("playlist", {})
         track_ids = [t["id"] for t in playlist.get("trackIds", [])][:limit]
         if not track_ids:
             return []
-        # 批量获取歌曲详情
-        detail = self.get_song_detail(track_ids)
-        songs = detail.get("songs", [])
+
+        # 分批获取歌曲详情（每批500首，避免API超时或返回不完整）
+        BATCH_SIZE = 500
+        all_songs = []
+        for i in range(0, len(track_ids), BATCH_SIZE):
+            batch_ids = track_ids[i:i + BATCH_SIZE]
+            try:
+                detail = self.get_song_detail(batch_ids)
+                songs = detail.get("songs", [])
+                all_songs.extend(songs)
+            except Exception as e:
+                print(f"[NeteaseAPI] 歌单详情分批获取失败 (batch {i//BATCH_SIZE + 1}): {e}")
+            if i + BATCH_SIZE < len(track_ids):
+                import time
+                time.sleep(0.3)  # 批次间短暂延迟，避免请求过快
+
         simple_list = []
-        for s in songs:
+        for s in all_songs:
             artists = "/".join(a.get("name", "") for a in s.get("ar", []))
             album = s.get("al", {}).get("name", "")
             cover = s.get("al", {}).get("picUrl", "")
