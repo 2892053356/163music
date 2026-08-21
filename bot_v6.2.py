@@ -1339,7 +1339,37 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退下载: {e}")
 
-    # 缓存未命中，下载音频到内存（重试1次）
+    # 缓存未命中
+    # 优先使用Cloudflare Workers代理URL发送（减少Render出站流量）
+    if config.AUDIO_PROXY_URL:
+        try:
+            from urllib.parse import quote
+            _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}&artist={quote(song['artist'])}"
+            logger.info(f"通过CF代理发送音频: {song['name']}")
+            msg = await context.bot.send_audio(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                audio=_proxy_url,
+                filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
+                title=song["name"],
+                performer=song["artist"],
+                caption=caption,
+                parse_mode="HTML",
+                thumbnail=song["cover"] if song["cover"] else None,
+                duration=song["duration"] // 1000 if song["duration"] else None,
+                reply_markup=reply_markup,
+            )
+            if edit:
+                await update.callback_query.delete_message()
+            # 发送成功后保存 file_id 到缓存
+            if msg and msg.audio and msg.audio.file_id:
+                await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+            active_search_plays.discard(user.id)
+            return
+        except Exception as e:
+            logger.warning(f"CF代理URL发送失败，回退下载: {e}")
+
+    # 回退方案：下载音频到内存（重试1次）
     audio_bytes = None
     filename = None
     for _retry in range(2):
@@ -1776,8 +1806,10 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             _cover = song.get("cover") or song.get("picUrl") or song.get("album_pic") or (song.get("al") or {}).get("picUrl")
             if _cover:
                 cover_param = f"&cover={quote(_cover, safe='')}"
-            proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
-            logger.info(f"内联结果 Render代理歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
+            # 使用Cloudflare Workers代理，减少Render出站流量
+            _proxy_base = config.AUDIO_PROXY_URL or config.WEBHOOK_URL.rstrip('/')
+            proxy_url = f"{_proxy_base}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
+            logger.info(f"内联结果 代理歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
             results.append(
                 InlineQueryResultAudio(
                     id=f"url_{song['id']}",
