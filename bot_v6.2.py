@@ -1368,8 +1368,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⛔ 权限不足", show_alert=True)
             return
         try:
-            keys = db._exec("KEYS", "cache:file_id:*")
-            cached_count = len(keys) if keys else 0
+            cached_count = db.count_file_ids()
         except Exception:
             cached_count = "未知"
         idle_time = int(time.time() - last_user_activity) if last_user_activity else "从未"
@@ -2773,10 +2772,9 @@ async def cmd_cachestatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(user.id):
         await update.message.reply_text("⛔ 权限不足。")
         return
-    # 统计已缓存数量
+    # 统计已缓存数量（使用SCAN命令，Upstash REST API的KEYS有bug）
     try:
-        keys = db._exec("KEYS", "cache:file_id:*")
-        cached_count = len(keys) if keys else 0
+        cached_count = db.count_file_ids()
     except Exception:
         cached_count = "未知"
     idle_time = int(time.time() - last_user_activity) if last_user_activity else "从未"
