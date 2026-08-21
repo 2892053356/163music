@@ -627,13 +627,31 @@ async def _show_playlist_page(update: Update, context, playlist_id: int, page: i
 
 async def _play_playlist_all(update: Update, context, playlist_id: int):
     """全部播放：后台逐个发送歌单歌曲（状态持久化到Redis，重启后继续）"""
-    songs = context.user_data.get(f"playlist_{playlist_id}", [])
-    if not songs:
-        await update.callback_query.edit_message_text("❌ 歌单数据已过期，请重新输入 /playlist")
+    user_id = update.callback_query.from_user.id
+
+    # 检查播放锁：防止同一用户重复播放
+    if db.enabled and db.has_playlist_lock(user_id):
+        await update.callback_query.edit_message_text("⚠️ 您已有歌单正在播放中，请等待播放完成或使用 /playliststop 停止后再播放。")
         return
 
     chat_id = update.callback_query.message.chat_id
     user_id = update.callback_query.from_user.id
+
+    # 锁机制：防止同一用户重复播放
+    if db.enabled:
+        if not db.acquire_playlist_lock(user_id, playlist_id):
+            logger.info(f"歌单播放：用户={user_id} 已有播放任务在运行，拒绝重复启动")
+            await update.callback_query.answer("⏳ 已有歌单正在播放，请等待完成或使用 /playliststop 停止", show_alert=True)
+            return
+        logger.info(f"歌单播放：用户={user_id} 获取播放锁 歌单={playlist_id}")
+
+    songs = context.user_data.get(f"playlist_{playlist_id}", [])
+    if not songs:
+        if db.enabled:
+            db.release_playlist_lock(user_id)
+        await update.callback_query.edit_message_text("❌ 歌单数据已过期，请重新输入 /playlist")
+        return
+
     await update.callback_query.edit_message_text(f"▶️ 开始全部播放 {len(songs)} 首歌曲...")
 
     # 保存播放状态到Redis（从第0首开始）
@@ -653,6 +671,8 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
                 )
                 db.remove_active_playlist(user_id)
+                if db.enabled:
+                    db.release_playlist_lock(user_id)
                 return
             # 中等优先级：最近3秒有用户活动则暂停（比缓存排行榜高，比用户单曲低）
             while time.time() - last_user_activity < 3:
@@ -665,6 +685,8 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                         text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
                     )
                     db.remove_active_playlist(user_id)
+                    if db.enabled:
+                        db.release_playlist_lock(user_id)
                     return
             try:
                 cached = db.get_file_id(song["id"])
@@ -709,6 +731,8 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
 
         # 播放完成，移除状态
         db.remove_active_playlist(user_id)
+        if db.enabled:
+            db.release_playlist_lock(user_id)
         logger.info(f"歌单播放完成：用户={user_id} 歌单={playlist_id} 成功{success}首，失败{failed}首")
         await context.bot.send_message(
             chat_id=chat_id,
@@ -720,12 +744,21 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
 
 async def _resume_playlist_play(application, user_id: int, playlist_id: int, songs: list, start_index: int, total: int):
     """断点续播：从指定进度继续播放歌单（服务重启后恢复）"""
+    # 锁机制：如果已有播放任务在运行，跳过续播
+    if db.enabled:
+        if not db.acquire_playlist_lock(user_id, playlist_id):
+            logger.info(f"歌单续播：用户={user_id} 已有播放任务在运行，跳过续播")
+            return
+        logger.info(f"歌单续播：用户={user_id} 获取播放锁 歌单={playlist_id} 从第{start_index+1}首开始")
+
     # 获取application的bot对象
     try:
         bot = application.bot
     except Exception as e:
         logger.error(f"歌单续播：无法获取bot对象 用户={user_id}: {e}")
         db.remove_active_playlist(user_id)
+        if db.enabled:
+            db.release_playlist_lock(user_id)
         return
 
     chat_id = user_id
@@ -745,6 +778,8 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
             except Exception:
                 pass
             db.remove_active_playlist(user_id)
+            if db.enabled:
+                db.release_playlist_lock(user_id)
             return
         # 中等优先级：最近3秒有用户活动则暂停
         while time.time() - last_user_activity < 3:
@@ -759,6 +794,8 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                 except Exception:
                     pass
                 db.remove_active_playlist(user_id)
+                if db.enabled:
+                    db.release_playlist_lock(user_id)
                 return
         try:
             cached = db.get_file_id(song["id"])
@@ -802,6 +839,8 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
 
     # 播放完成
     db.remove_active_playlist(user_id)
+    if db.enabled:
+        db.release_playlist_lock(user_id)
     logger.info(f"歌单续播完成：用户={user_id} 歌单={playlist_id} 成功{success}首，失败{failed}首")
     try:
         await bot.send_message(

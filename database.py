@@ -269,6 +269,26 @@ class UpstashDB:
         """删除配置值"""
         self._exec("HDEL", "bot:config", key)
 
+    # ---- 歌单播放锁（防止同一用户重复播放）----
+    def acquire_playlist_lock(self, user_id: int, playlist_id: int) -> bool:
+        """获取歌单播放锁，成功返回True，已被占用返回False"""
+        # SETNX: key不存在时设置，存在时不设置
+        result = self._exec("SETNX", f"bot:playlist_lock:{user_id}", str(playlist_id))
+        if result:
+            # 设置过期时间1小时，防止异常导致锁不释放
+            self._exec("EXPIRE", f"bot:playlist_lock:{user_id}", 3600)
+            return True
+        return False
+
+    def release_playlist_lock(self, user_id: int):
+        """释放歌单播放锁"""
+        self._exec("DEL", f"bot:playlist_lock:{user_id}")
+
+    def has_playlist_lock(self, user_id: int) -> bool:
+        """检查用户是否有歌单播放锁"""
+        result = self._exec("EXISTS", f"bot:playlist_lock:{user_id}")
+        return bool(result)
+
 
 # 全局实例
 db = UpstashDB()
