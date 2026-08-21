@@ -1346,13 +1346,12 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退下载: {e}")
 
-    # 缓存未命中
-    # 优先使用Cloudflare Workers代理URL发送（减少Render出站流量）
+    # 缓存未命中：必须使用外部代理URL发送（禁止Render下载+上传）
     if config.AUDIO_PROXY_URL:
         try:
             from urllib.parse import quote
             _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}&artist={quote(song['artist'])}"
-            logger.info(f"通过CF代理发送音频: {song['name']}")
+            logger.info(f"通过代理URL发送音频: {song['name']}")
             msg = await context.bot.send_audio(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
@@ -1374,68 +1373,23 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             active_search_plays.discard(user.id)
             return
         except Exception as e:
-            logger.warning(f"CF代理URL发送失败，回退下载: {e}")
-
-    # 回退方案：下载音频到内存（重试1次）
-    audio_bytes = None
-    filename = None
-    for _retry in range(2):
-        try:
-            if edit and _retry == 0:
-                await update.callback_query.edit_message_text("📥 正在下载并发送音频...")
-            resp = requests_get(url, timeout=50)
-            if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                raise Exception(f"下载异常: 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
-            audio_bytes = io.BytesIO(resp.content)
-            # 写入ID3标签，确保Telegram显示正确的标题和艺术家
-            audio_bytes = _tag_mp3(audio_bytes, song)
-            filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-            break
-        except Exception as e:
-            logger.warning(f"下载音频失败(第{_retry+1}次): {e}")
-            if _retry == 0:
-                await asyncio.sleep(1)  # 重试前等待1秒
-                continue
-            logger.error(f"下载音频最终失败: {e}")
+            logger.error(f"代理URL发送失败: {e}")
+            err_msg = f"❌ 音频发送失败（代理服务异常），请稍后重试。\n\n{_song_caption(song)}"
             if edit:
-                await update.callback_query.edit_message_text("❌ 音频下载失败，请稍后重试。")
+                await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
             else:
-                await update.message.reply_text("❌ 音频下载失败，请稍后重试。")
+                await update.message.reply_text(err_msg, parse_mode="HTML")
             active_search_plays.discard(user.id)
             return
-
-    try:
-        msg = await context.bot.send_audio(
-            chat_id=chat_id,
-            message_thread_id=message_thread_id,
-            audio=audio_bytes,
-            filename=filename,
-            title=song["name"],
-            performer=song["artist"],
-            caption=caption,
-            parse_mode="HTML",
-            thumbnail=song["cover"] if song["cover"] else None,
-            duration=song["duration"] // 1000 if song["duration"] else None,
-            reply_markup=reply_markup,
-        )
+    else:
+        # 未配置代理URL，无法发送（禁止Render下载+上传）
+        err_msg = f"❌ 未配置音频代理服务（AUDIO_PROXY_URL），无法发送音频。\n\n请配置 Netlify 或 Cloudflare 音频代理。"
         if edit:
-            await update.callback_query.delete_message()
-        # 发送成功后保存 file_id 到缓存
-        if msg and msg.audio and msg.audio.file_id:
-            await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
-    except Exception as e:
-        logger.error(f"发送音频失败: {e}")
-        if edit:
-            await update.callback_query.edit_message_text(
-                "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
-            )
+            await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
         else:
-            await update.message.reply_text(
-                "⚠️ 音频发送超时，请稍等片刻查看是否已收到音频；如未收到请重试。"
-            )
-    finally:
-        # 清除搜索播放活动标志
+            await update.message.reply_text(err_msg, parse_mode="HTML")
         active_search_plays.discard(user.id)
+        return
 
 
 # 共享下载Session（连接复用）+ 重试适配器
@@ -1822,15 +1776,16 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             )
         else:
-            # 未缓存：使用Render代理端点（Telegram→Render→CDN，稳定可靠）
+            # 未缓存：使用内联专用代理（Netlify，速度快无CPU限制），未配置则回退到通用代理
             cover_param = ""
             _cover = song.get("cover") or song.get("picUrl") or song.get("album_pic") or (song.get("al") or {}).get("picUrl")
             if _cover:
                 cover_param = f"&cover={quote(_cover, safe='')}"
-            # 使用Cloudflare Workers代理，减少Render出站流量
-            _proxy_base = config.AUDIO_PROXY_URL or config.WEBHOOK_URL.rstrip('/')
+            # 内联搜索优先使用 INLINE_PROXY_URL（Netlify），未配置则回退到 AUDIO_PROXY_URL（CF）
+            _proxy_base = config.INLINE_PROXY_URL or config.AUDIO_PROXY_URL or config.WEBHOOK_URL.rstrip('/')
+            _proxy_type = "Netlify" if config.INLINE_PROXY_URL else ("CF" if config.AUDIO_PROXY_URL else "Render")
             proxy_url = f"{_proxy_base}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
-            logger.info(f"内联结果 代理歌曲 {song['name']} proxy_url长度={len(proxy_url)}")
+            logger.info(f"内联结果 代理歌曲 {song['name']} 代理类型={_proxy_type} proxy_url长度={len(proxy_url)}")
             results.append(
                 InlineQueryResultAudio(
                     id=f"url_{song['id']}",
