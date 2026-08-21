@@ -850,6 +850,69 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await query.answer("✅ 已发送停止指令", show_alert=True)
         await query.edit_message_text(f"✅ 已停止用户 {target_uid} 的歌单播放。")
+    elif data.startswith("fallback_netease_"):
+        # 用户点击备用链接按钮，使用Railway代理URL发送音频
+        song_id_str = data[len("fallback_netease_"):]
+        try:
+            song_id = int(song_id_str)
+        except ValueError:
+            await query.answer("无效的歌曲ID", show_alert=True)
+            return
+
+        await query.answer("🔄 正在使用备用链接发送音频...", show_alert=True)
+
+        try:
+            # 获取播放地址
+            url_result = await asyncio.to_thread(api.get_song_url, [song_id], level=db.get_quality())
+            url = None
+            for item in url_result.get("data", []):
+                if item.get("id") == song_id:
+                    url = item.get("url")
+                    break
+
+            if not url:
+                await query.edit_message_text("❌ 获取播放地址失败，请稍后重试。")
+                return
+
+            # 获取歌曲详情
+            detail = await asyncio.to_thread(api.get_song_detail, [song_id])
+            songs_detail = detail.get("songs", [])
+            if not songs_detail:
+                await query.edit_message_text("❌ 获取歌曲详情失败。")
+                return
+
+            raw_song = songs_detail[0]
+            song = {
+                "id": raw_song.get("id", song_id),
+                "name": raw_song.get("name", "未知歌曲"),
+                "artist": "/".join([a.get("name", "") for a in raw_song.get("ar", []) if a.get("name")]) or "未知艺术家",
+                "album": (raw_song.get("al") or {}).get("name", "未知专辑"),
+                "duration": raw_song.get("dt", 0),
+            }
+
+            # 使用Railway代理URL发送音频
+            from urllib.parse import quote
+            proxy_url = f"{config.WEBHOOK_URL.rstrip('/')}/audio/{song_id}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}"
+
+            caption = f"🎵 <b>{song['name']}</b>\n👤 {song['artist']}\n💿 {song['album']}"
+
+            await context.bot.send_audio(
+                chat_id=user.id,
+                audio=proxy_url,
+                title=song["name"],
+                performer=song["artist"],
+                caption=caption,
+                parse_mode="HTML"
+            )
+
+            await query.edit_message_text("✅ 已使用备用链接（Railway 转发）发送音频，请查看上方消息。")
+
+            # 后台缓存到管理员
+            asyncio.create_task(_cache_song_to_admin(context, song, url))
+
+        except Exception as e:
+            logger.error(f"备用链接发送失败 song_id={song_id}: {e}")
+            await query.edit_message_text(f"❌ 发送失败：{e}")
     elif data == "cache_now":
         # 管理员立即缓存
         if not _is_admin(user.id):
@@ -1521,6 +1584,41 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     user = chosen.from_user
     user_label = f"{user.username or user.first_name or user.id}"
     logger.info(f"内联选择 用户={user_label}(id={user.id}) song_id={song_id} query='{chosen.query}'")
+
+    # 网易云直传歌曲：发送加载反馈，15秒超时自动提供备用链接
+    if rid.startswith("netease_"):
+        try:
+            detail = await asyncio.to_thread(api.get_song_detail, [song_id])
+            songs_detail = detail.get("songs", [])
+            if songs_detail:
+                raw_song = songs_detail[0]
+                song_name = raw_song.get("name", "未知歌曲")
+                artist = "/".join([a.get("name", "") for a in raw_song.get("ar", []) if a.get("name")]) or "未知艺术家"
+
+                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                fallback_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 加载超时？点击使用备用链接", callback_data=f"fallback_netease_{song_id}")
+                ]])
+                feedback_msg = await context.bot.send_message(
+                    chat_id=user.id,
+                    text=f"🎵 <b>{song_name}</b> - {artist}\n\n"
+                         f"⏳ 正在加载音频，如果 15 秒内未播放，请点击下方按钮使用备用链接（Railway 转发）。",
+                    parse_mode="HTML",
+                    reply_markup=fallback_keyboard
+                )
+                logger.info(f"内联选择 已发送加载反馈给用户={user_label} song_id={song_id}")
+
+                # 15秒后自动删除反馈消息（如果用户未点击按钮）
+                async def _auto_delete_feedback():
+                    await asyncio.sleep(15)
+                    try:
+                        await context.bot.delete_message(chat_id=user.id, message_id=feedback_msg.message_id)
+                        logger.info(f"内联选择 15秒超时，自动删除反馈消息 song_id={song_id}")
+                    except Exception:
+                        pass
+                asyncio.create_task(_auto_delete_feedback())
+        except Exception as e:
+            logger.warning(f"内联选择 发送加载反馈失败: {e}")
 
     # 检查是否已缓存
     if await asyncio.to_thread(db.get_file_id, song_id):
