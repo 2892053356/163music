@@ -162,8 +162,12 @@ inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
 _processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
 
 # 内联请求活跃计数（优先级控制：有内联请求时暂停歌单缓存和闲时缓存）
-# 内联请求开始时+1，内联结果返回后延迟30秒-1（给用户选择结果和发送音频的时间）
+# 内联请求开始时+1，内联结果返回后延迟10秒-1（给用户选择结果和发送音频的时间）
 inline_request_active = 0
+
+# 缓存任务引用（内联请求时可 cancel() 真正立即中断）
+manual_cache_task = None   # 手动缓存任务（/cache 命令）
+auto_cache_task = None     # 闲时自动缓存任务
 
 # 搜索播放活动集合（优先级控制：用户搜索播放时暂停歌单播放）
 # 内联搜索 > 普通搜索 > 歌单播放 > 闲时缓存
@@ -1552,6 +1556,56 @@ def requests_get(url: str, timeout: int = 45):
     return _download_session.get(url, timeout=(connect_timeout, read_timeout))
 
 
+# ============================================================
+# aiohttp 异步下载（可被 cancel() 真正立即中断）
+# ============================================================
+import aiohttp
+_aiohttp_session = None
+
+async def _get_aiohttp_session():
+    """获取或创建全局 aiohttp session（连接复用）"""
+    global _aiohttp_session
+    if _aiohttp_session is None or _aiohttp_session.closed:
+        timeout = aiohttp.ClientTimeout(total=45, connect=15)
+        _aiohttp_session = aiohttp.ClientSession(
+            timeout=timeout,
+            headers={"Referer": "https://music.163.com/"}
+        )
+    return _aiohttp_session
+
+
+async def aiohttp_get(url: str, timeout: int = 45):
+    """
+    异步 GET 请求（可被 asyncio.Task.cancel() 真正中断）
+    返回对象兼容 requests.Response 的常用属性：status_code, content, text
+    """
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
+    
+    session = await _get_aiohttp_session()
+    client_timeout = aiohttp.ClientTimeout(total=timeout, connect=15)
+    
+    async with session.get(url, timeout=client_timeout) as resp:
+        content = await resp.read()
+        # 构造兼容对象
+        class _Resp:
+            pass
+        result = _Resp()
+        result.status_code = resp.status
+        result.content = content
+        result.text = content.decode("utf-8", errors="ignore")
+        result.headers = dict(resp.headers)
+        return result
+
+
+async def close_aiohttp_session():
+    """关闭 aiohttp session（程序退出时调用）"""
+    global _aiohttp_session
+    if _aiohttp_session and not _aiohttp_session.closed:
+        await _aiohttp_session.close()
+        _aiohttp_session = None
+
+
 async def _send_song_to_private(context, user_id: int, song_id: int):
     """向用户私聊发送指定歌曲（内联结果"在私聊播放"按钮使用）"""
     try:
@@ -1760,6 +1814,15 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 内联请求开始，增加活跃计数（暂停歌单缓存和闲时缓存）
     inline_request_active += 1
     logger.info(f"内联请求 活跃计数+1 = {inline_request_active}")
+
+    # 方案1：立即取消正在运行的缓存任务（aiohttp 可被真正中断）
+    global manual_cache_task, auto_cache_task
+    if manual_cache_task and not manual_cache_task.done():
+        logger.info("内联请求：🛑 立即取消手动缓存任务")
+        manual_cache_task.cancel()
+    if auto_cache_task and not auto_cache_task.done():
+        logger.info("内联请求：🛑 立即取消闲时自动缓存任务")
+        auto_cache_task.cancel()
 
     # 延迟减少计数的辅助函数（内联结果返回后10秒，给用户选择和发送音频的时间）
     async def _dec_inline_active():
@@ -2561,6 +2624,9 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("📊 正在获取热歌榜前100首...")
 
+    # 全局变量：保存手动缓存任务引用，便于内联请求时取消
+    global manual_cache_task
+
     async def _do_cache():
         try:
             songs = await asyncio.to_thread(api.get_toplist_songs, 3778678, 100)
@@ -2599,8 +2665,8 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not url:
                         failed += 1
                         continue
-                    # 下载
-                    resp = await asyncio.to_thread(requests_get, url, 45)
+                    # 下载（使用 aiohttp，可被 cancel() 真正立即中断）
+                    resp = await aiohttp_get(url, 45)
                     if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
                         failed += 1
                         continue
@@ -2622,6 +2688,14 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         success += 1
                     else:
                         failed += 1
+                except asyncio.CancelledError:
+                    # 内联请求取消了任务，保存进度并退出
+                    logger.info(f"歌单缓存：🛑 被内联请求中断（当前{idx}/{len(to_cache)}，成功{success}，失败{failed}）")
+                    await context.bot.send_message(
+                        config.ADMIN_ID,
+                        f"🛑 缓存预热被内联请求中断（进度{idx}/{len(to_cache)}，成功{success}，失败{failed}）\n内联结束后可重新启动。"
+                    )
+                    raise  # 重新抛出，让任务真正结束
                 except Exception as e:
                     logger.warning(f"缓存预热失败 {song['name']}: {e}")
                     failed += 1
@@ -2637,11 +2711,14 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 config.ADMIN_ID,
                 f"✅ 缓存预热完成！成功{success}首，失败{failed}首，跳过已缓存{already}首。"
             )
+        except asyncio.CancelledError:
+            logger.info("歌单缓存任务被取消（CancelledError）")
+            raise
         except Exception as e:
             logger.error(f"缓存预热任务失败: {e}")
             await context.bot.send_message(config.ADMIN_ID, f"❌ 缓存预热失败: {e}")
 
-    asyncio.create_task(_do_cache())
+    manual_cache_task = asyncio.create_task(_do_cache())
 
 
 async def cmd_autocache(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3457,7 +3534,7 @@ def main():
                                 logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址（已加入放弃缓存）")
                                 continue
                             _dl_start = time.time()
-                            resp = await asyncio.to_thread(requests_get, url, 45)
+                            resp = await aiohttp_get(url, 45)  # 使用 aiohttp，可被 cancel() 真正立即中断
                             _dl_time = time.time() - _dl_start
                             if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
                                 failed += 1
@@ -3498,6 +3575,11 @@ def main():
                             else:
                                 failed += 1
                                 logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 上传无file_id")
+                        except asyncio.CancelledError:
+                            # 内联请求取消了任务，保存进度并退出
+                            logger.info(f"闲时缓存：🛑 被内联请求中断（当前{idx}/{len(to_cache)}，成功{success}，失败{failed}）")
+                            _interrupted = True
+                            raise  # 重新抛出，让任务真正结束
                         except Exception as e:
                             failed += 1
                             logger.warning(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 异常: {e}")
@@ -3635,7 +3717,8 @@ def main():
 
                     # 如果当前空闲，立即触发缓存；否则等闲时自动触发
                     if time.time() - last_user_activity >= AUTO_CACHE_IDLE_THRESHOLD and not auto_cache_running:
-                        asyncio.create_task(_do_auto_cache())
+                        global auto_cache_task
+                        auto_cache_task = asyncio.create_task(_do_auto_cache())
                         logger.info("当前空闲，立即开始缓存")
                     else:
                         logger.info("当前有用户活动或正在缓存，等待闲时自动触发")
@@ -3658,7 +3741,8 @@ def main():
                     _today_str = datetime.datetime.now().strftime("%Y-%m-%d")
                     if db.enabled and db._exec("EXISTS", f"auto_cache:done:{_today_str}"):
                         continue
-                    asyncio.create_task(_do_auto_cache())
+                    global auto_cache_task
+                    auto_cache_task = asyncio.create_task(_do_auto_cache())
 
             # 保存引用，供管理员"立即缓存"按钮调用
             global _do_auto_cache_func
