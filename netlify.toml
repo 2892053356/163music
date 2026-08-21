@@ -1,0 +1,31 @@
+# Netlify 部署配置
+# 网易云音乐音频代理服务
+
+[build]
+  # 不需要构建，直接部署静态文件和函数
+  command = "echo 'Netlify Functions 部署完成'"
+  publish = "."
+
+# 重写规则：将 /audio/{song_id} 重写到函数
+[[redirects]]
+  from = "/audio/*"
+  to = "/.netlify/functions/audio-proxy?song_id=:splat"
+  status = 200
+  force = true
+
+# 首页重定向到 GitHub
+[[redirects]]
+  from = "/"
+  to = "https://github.com/XiOuDi/163music"
+  status = 302
+
+# 函数配置
+[functions]
+  # 函数目录
+  directory = "netlify/functions"
+  # 函数超时（秒），免费版最大10秒
+  timeout = 10
+
+# 函数特定配置
+[functions."audio-proxy"]
+  timeout = 10
