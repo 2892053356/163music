@@ -1784,13 +1784,13 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         asyncio.create_task(_dec_inline_active())
         return
 
-    # 防抖：纯字母输入（4-8位等待800ms防抖，期间有新输入则跳过）
+    # 防抖：纯字母输入（4-8位等待300ms防抖，期间有新输入则跳过）- 优化：从800ms减少到300ms
     is_pure_letters = keyword.isascii() and any(c.isalpha() for c in keyword) and not any(c.isspace() for c in keyword) and not any(c.isdigit() for c in keyword)
 
     query_time = time.time()
     inline_last_query[user.id] = (keyword, query_time)
     if is_pure_letters and len(keyword) <= 8:
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(0.3)  # 优化：从0.8秒减少到0.3秒
         latest = inline_last_query.get(user.id)
         if not latest or latest[1] != query_time or latest[0] != keyword:
             logger.info(f"内联防抖 跳过旧查询 '{keyword}'")
@@ -1805,11 +1805,23 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if clean_keyword != keyword:
         logger.info(f"内联搜索 关键词清洗: '{keyword}' -> '{clean_keyword}'")
 
-    # 2. 搜索函数：支持自定义关键词和超时
+    # 优化：搜索结果缓存（Upstash，60秒过期），重复搜索瞬间返回
+    search_cache_key = f"inline_search:{clean_keyword.lower()}"
+    cached_songs = []
+    try:
+        cached_result = db._exec("GET", search_cache_key)
+        if cached_result:
+            import json
+            cached_songs = json.loads(cached_result)
+            logger.info(f"内联搜索缓存命中: keyword='{clean_keyword}' 结果数={len(cached_songs)}")
+    except Exception as e:
+        logger.warning(f"内联搜索缓存读取失败: {e}")
+
+    # 2. 搜索函数：支持自定义关键词和超时 - 优化：超时从5秒减少到3秒
     async def _do_search(kw: str, timeout_sec: float) -> list:
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(api.search_songs_simple, kw, 8),
+                asyncio.to_thread(api.search_songs_simple, kw, 5),  # 优化：搜索结果从8首减少到5首
                 timeout=timeout_sec
             )
         except asyncio.TimeoutError:
@@ -1819,30 +1831,40 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.warning(f"内联搜索 异常 keyword='{kw}' error={e}")
             return []
 
-    songs = []
+    songs = cached_songs  # 优先使用缓存
     search_start = time.time()
 
-    # 第一次搜索：清洗后的关键词，5秒超时
-    songs = await _do_search(clean_keyword, 5)
-
-    # 3. 降级搜索：如果第一次失败，尝试用前2个单词搜索
-    if not songs and len(clean_keyword.split()) > 2:
-        fallback_kw = " ".join(clean_keyword.split()[:2])
-        elapsed = time.time() - search_start
-        remaining = max(0.5, 5 - elapsed)
-        logger.info(f"内联搜索 降级搜索: '{clean_keyword}' -> '{fallback_kw}' (剩余{remaining:.1f}s)")
-        songs = await _do_search(fallback_kw, remaining)
-
-    # 如果清洗后的关键词搜索失败，再尝试原始关键词（可能特殊字符是歌名的一部分）
-    if not songs and clean_keyword != keyword:
-        elapsed = time.time() - search_start
-        remaining = max(0.5, 5 - elapsed)
-        if remaining > 1:
-            logger.info(f"内联搜索 尝试原始关键词: '{keyword}' (剩余{remaining:.1f}s)")
-            songs = await _do_search(keyword, remaining)
-
+    # 如果缓存未命中，执行搜索 - 优化：总超时控制在3秒内
     if not songs:
-        logger.error(f"内联搜索失败（多次尝试后）keyword='{keyword}'")
+        # 第一次搜索：清洗后的关键词，3秒超时
+        songs = await _do_search(clean_keyword, 3)
+
+        # 3. 降级搜索：如果第一次失败，尝试用前2个单词搜索 - 优化：只在剩余时间充足时尝试
+        if not songs and len(clean_keyword.split()) > 2:
+            elapsed = time.time() - search_start
+            remaining = max(0.5, 2 - elapsed)  # 优化：总搜索时间控制在2秒内
+            if remaining > 1:
+                fallback_kw = " ".join(clean_keyword.split()[:2])
+                logger.info(f"内联搜索 降级搜索: '{clean_keyword}' -> '{fallback_kw}' (剩余{remaining:.1f}s)")
+                songs = await _do_search(fallback_kw, remaining)
+
+        # 如果清洗后的关键词搜索失败，再尝试原始关键词 - 优化：只在剩余时间充足时尝试
+        if not songs and clean_keyword != keyword:
+            elapsed = time.time() - search_start
+            remaining = max(0.5, 2 - elapsed)
+            if remaining > 1:
+                logger.info(f"内联搜索 尝试原始关键词: '{keyword}' (剩余{remaining:.1f}s)")
+                songs = await _do_search(keyword, remaining)
+
+        # 写入缓存（60秒过期）
+        if songs:
+            try:
+                import json
+                db._exec("SET", search_cache_key, json.dumps(songs, ensure_ascii=False))
+                db._exec("EXPIRE", search_cache_key, 60)
+                logger.info(f"内联搜索缓存写入: keyword='{clean_keyword}' 结果数={len(songs)} 过期=60秒")
+            except Exception as e:
+                logger.warning(f"内联搜索缓存写入失败: {e}")
 
     # 调试日志：输出搜索关键词和返回结果
     song_names = [f"{s['name']}({s['artist']})" for s in songs[:5]]
@@ -1866,20 +1888,19 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 使用代理端点，无需预获取播放地址，直接用所有搜索结果
-    valid_songs = songs[:8]  # 最多8首，减少超时概率
+    valid_songs = songs[:5]  # 优化：从8首减少到5首，减少超时概率
 
     bot_username = context.bot.username or ""
     via_line = f"\n\n🤖 via @{bot_username}" if bot_username else ""
 
-    # 并发获取所有歌曲的file_id缓存（1秒超时，避免Redis慢导致查询过期）
-    # 批量获取所有歌曲的file_id缓存（3秒超时，MGET单次查询减少网络往返）
+    # 并发获取所有歌曲的file_id缓存 - 优化：超时从3秒减少到1秒
     try:
         file_id_map = await asyncio.wait_for(
             asyncio.to_thread(db.get_file_ids_batch, [s["id"] for s in valid_songs]),
-            timeout=3
+            timeout=1  # 优化：从3秒减少到1秒
         )
         cached_count = sum(1 for v in file_id_map.values() if v and str(v).strip())
-        logger.info(f"内联搜索 file_id缓存查询: 命中{cached_count}/{len(valid_songs)} map={ {k: (v[:20]+'...' if v else 'None') for k,v in list(file_id_map.items())[:3]} }")
+        logger.info(f"内联搜索 file_id缓存查询: 命中{cached_count}/{len(valid_songs)}")
     except asyncio.TimeoutError:
         logger.warning("内联搜索 file_id批量查询超时，全部使用代理URL")
         file_id_map = {}
