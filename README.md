@@ -1,5 +1,9 @@
 # 🎵 网易云音乐 Telegram Bot
 
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/XiOuDi/163music?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
+[![GitHub Release Date](https://img.shields.io/github/release-date/XiOuDi/163music?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
+[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/XiOuDi/163music/total?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
+
 支持搜索、播放网易云音乐的 Telegram 机器人，带内联搜索、管理员功能、音质设置、Cookie自动刷新和闲时自动缓存。
 
 作者：https://t.me/xioudi_a
@@ -9,10 +13,10 @@ bot:https://t.me/xioudi163_bot
 ## ✨ 功能
 
 ### 基础功能
-- `/play 歌曲名` — 搜索并播放歌曲（支持下一页）
+- `/music 歌曲名` — 搜索并播放歌曲（支持下一页）
 - 内联搜索：`@XiOuDi163_bot 歌曲名` — 任意对话中直接分享音频（返回8首结果）
 - 内联结果"点击在bot中播放"按钮 — 点击自动跳转bot私聊播放
-- `/playlist 歌单ID/链接` — 播放网易云歌单（仅私聊有效）
+- `/playlist 歌单ID/链接` — 播放网易云歌单
 - 音频带 ID3 标签（正确显示标题/艺术家/专辑封面）
 - 歌词获取（音频下方按钮）
 - MP3格式，标准音质（可切换较高音质）
@@ -106,9 +110,9 @@ Upstash 免费版：每日 10000 次命令，256MB 存储，足够个人使用�
 
 ## 📖 使用
 
-- `/play 歌曲名` — 搜索播放
+- `/music 歌曲名` — 搜索播放
 - `@机器人用户名 歌曲名` — 内联搜索分享
-- `/playlist 歌单ID` — 播放歌单（仅私聊）
+- `/playlist 歌单ID` — 播放歌单
 - `/admin` — 管理员面板
 - `/quality` — 查看音质
 - `/setquality higher` — 设置较高音质
