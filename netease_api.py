@@ -202,6 +202,7 @@ class NeteaseAPI:
         获取排行榜/歌单歌曲（默认云音乐热歌榜 3778678）
         超过500首时分批获取歌曲详情，避免API超时
         返回精简列表，同 search_songs_simple 格式
+        优化：减少批次延迟到0.1秒
         """
         path = "/weapi/v6/playlist/detail"
         data = {"id": playlist_id, "n": 10000, "s": 0}
@@ -224,7 +225,62 @@ class NeteaseAPI:
                 print(f"[NeteaseAPI] 歌单详情分批获取失败 (batch {i//BATCH_SIZE + 1}): {e}")
             if i + BATCH_SIZE < len(track_ids):
                 import time
-                time.sleep(0.3)  # 批次间短暂延迟，避免请求过快
+                time.sleep(0.1)  # 优化：批次间延迟从0.3秒减少到0.1秒
+
+        simple_list = []
+        for s in all_songs:
+            artists = "/".join(a.get("name", "") for a in s.get("ar", []))
+            album = s.get("al", {}).get("name", "")
+            cover = s.get("al", {}).get("picUrl", "")
+            simple_list.append({
+                "id": s.get("id"),
+                "name": s.get("name", ""),
+                "artist": artists,
+                "album": album,
+                "cover": cover,
+                "duration": s.get("dt", 0),
+            })
+        return simple_list
+
+    async def get_toplist_songs_async(self, playlist_id: int = 3778678, limit: int = 10000, max_concurrent: int = 2) -> list:
+        """
+        异步并发获取歌单歌曲（优化版）
+        使用 asyncio.gather 并发获取多批歌曲详情，并发数默认2
+        返回精简列表
+        """
+        import asyncio
+        path = "/weapi/v6/playlist/detail"
+        data = {"id": playlist_id, "n": 10000, "s": 0}
+        result = await asyncio.to_thread(self._post, path, data)
+        playlist = result.get("playlist", {})
+        track_ids = [t["id"] for t in playlist.get("trackIds", [])][:limit]
+        if not track_ids:
+            return []
+
+        # 分批获取歌曲详情（每批500首）
+        BATCH_SIZE = 500
+        batches = [track_ids[i:i + BATCH_SIZE] for i in range(0, len(track_ids), BATCH_SIZE)]
+
+        # 并发获取歌曲详情（控制并发数）
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def fetch_batch(batch_ids, batch_idx):
+            async with semaphore:
+                try:
+                    detail = await asyncio.to_thread(self.get_song_detail, batch_ids)
+                    songs = detail.get("songs", [])
+                    print(f"[NeteaseAPI] 并发获取歌单详情 batch {batch_idx + 1}/{len(batches)} 成功，{len(songs)}首")
+                    return songs
+                except Exception as e:
+                    print(f"[NeteaseAPI] 并发获取歌单详情失败 (batch {batch_idx + 1}): {e}")
+                    return []
+
+        tasks = [fetch_batch(batch, idx) for idx, batch in enumerate(batches)]
+        results = await asyncio.gather(*tasks)
+
+        all_songs = []
+        for songs in results:
+            all_songs.extend(songs)
 
         simple_list = []
         for s in all_songs:
