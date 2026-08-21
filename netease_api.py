@@ -197,17 +197,16 @@ class NeteaseAPI:
     # ----------------------------------------------------------
     # 排行榜
     # ----------------------------------------------------------
-    def get_toplist_songs(self, playlist_id: int = 3778678, limit: int = 100, offset: int = 0) -> list:
+    def get_toplist_songs(self, playlist_id: int = 3778678, limit: int = 100) -> list:
         """
         获取排行榜歌曲（默认云音乐热歌榜 3778678）
         返回精简列表，同 search_songs_simple 格式
-        支持分页：offset 为起始位置
         """
         path = "/weapi/v6/playlist/detail"
         data = {"id": playlist_id, "n": 1000, "s": 0}
         result = self._post(path, data)
         playlist = result.get("playlist", {})
-        track_ids = [t["id"] for t in playlist.get("trackIds", [])][offset:offset+limit]
+        track_ids = [t["id"] for t in playlist.get("trackIds", [])][:limit]
         if not track_ids:
             return []
         # 批量获取歌曲详情
@@ -228,16 +227,55 @@ class NeteaseAPI:
             })
         return simple_list
 
-    def get_playlist_track_count(self, playlist_id: int) -> int:
-        """获取歌单总歌曲数"""
+    # ----------------------------------------------------------
+    # 用户歌单
+    # ----------------------------------------------------------
+    def get_user_playlists(self, uid: int, limit: int = 30, offset: int = 0) -> list:
+        """
+        获取用户的歌单列表
+        返回: [{"id": int, "name": str, "trackCount": int, "cover": str}, ...]
+        """
+        path = "/weapi/user/playlist"
+        data = {
+            "uid": uid,
+            "limit": limit,
+            "offset": offset,
+            "includeVideo": True,
+        }
+        result = self._post(path, data)
+        playlists = result.get("playlist", [])
+        simple_list = []
+        for p in playlists:
+            simple_list.append({
+                "id": p.get("id"),
+                "name": p.get("name", ""),
+                "trackCount": p.get("trackCount", 0),
+                "cover": p.get("coverImgUrl", ""),
+                "creator": p.get("creator", {}).get("nickname", ""),
+            })
+        return simple_list
+
+    def get_user_playlist_songs(self, uid: int, max_per_playlist: int = 100) -> list:
+        """
+        获取用户所有歌单中的歌曲（去重）
+        返回精简歌曲列表
+        """
+        all_songs = []
+        seen_ids = set()
         try:
-            path = "/weapi/v6/playlist/detail"
-            data = {"id": playlist_id, "n": 1, "s": 0}
-            result = self._post(path, data)
-            playlist = result.get("playlist", {})
-            return playlist.get("trackCount", 0) or len(playlist.get("trackIds", []))
+            playlists = self.get_user_playlists(uid, limit=100)
+            for pl in playlists:
+                try:
+                    songs = self.get_toplist_songs(pl["id"], limit=max_per_playlist)
+                    for s in songs:
+                        if s["id"] not in seen_ids:
+                            seen_ids.add(s["id"])
+                            all_songs.append(s)
+                except Exception:
+                    continue
         except Exception:
-            return 0
+            pass
+        return all_songs
 
     # ----------------------------------------------------------
     # Cookie 管理
@@ -283,3 +321,47 @@ class NeteaseAPI:
             return result.get("code") == 200
         except Exception:
             return False
+
+    # ----------------------------------------------------------
+    # 用户歌单
+    # ----------------------------------------------------------
+    def get_user_playlists(self, uid: int, limit: int = 30, offset: int = 0) -> list:
+        """
+        获取指定用户的歌单列表
+        返回: [{"id": int, "name": str, "trackCount": int, "coverImgUrl": str}, ...]
+        """
+        path = "/weapi/user/playlist"
+        data = {
+            "uid": uid,
+            "limit": limit,
+            "offset": offset,
+            "includeVideo": True,
+        }
+        result = self._post(path, data)
+        playlists = result.get("playlist", [])
+        simple_list = []
+        for p in playlists:
+            simple_list.append({
+                "id": p.get("id"),
+                "name": p.get("name", ""),
+                "trackCount": p.get("trackCount", 0),
+                "coverImgUrl": p.get("coverImgUrl", ""),
+            })
+        return simple_list
+
+    def get_current_user_id(self) -> int:
+        """获取当前登录账号的用户ID（基于cookie），失败返回0"""
+        try:
+            path = "/weapi/nuser/account/get"
+            result = self._post(path, {})
+            profile = result.get("profile", {})
+            return profile.get("userId", 0)
+        except Exception:
+            return 0
+
+    def get_playlist_songs(self, playlist_id: int, limit: int = 1000) -> list:
+        """
+        获取指定歌单的所有歌曲（精简格式）
+        返回格式同 search_songs_simple
+        """
+        return self.get_toplist_songs(playlist_id, limit=limit)
