@@ -2684,7 +2684,6 @@ def main():
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("play", cmd_play))
-    application.add_handler(CommandHandler("music", cmd_play))  # 兼容旧命令
     application.add_handler(CommandHandler("playlist", cmd_playlist))
     application.add_handler(CommandHandler("admin", cmd_admin))
     application.add_handler(CommandHandler("addadmin", cmd_add_admin))
