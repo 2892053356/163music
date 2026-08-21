@@ -4,7 +4,7 @@ Telegram 网易云音乐机器人
   - /start  开始使用
   - /help   帮助
   - /music <关键词>  搜索歌曲（按钮选择播放）
-  - 内联搜索：@XiOuDi63_bot <关键词>
+  - 内联搜索：@XiOuDi163_bot <关键词>
   - 管理员：/admin /broadcast /stats /ban /unban
 """
 
@@ -488,11 +488,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n\n📖 <b>使用方法：</b>\n"
         "1️⃣ /play 歌曲名 — 搜索并播放歌曲\n"
         "2️⃣ /playlist 歌单ID/链接 — 播放网易云歌单（仅限私聊）\n"
-        "3️⃣ 内联搜索：在任意聊天输入 <code>@XiOuDi63_bot 歌曲名</code>\n\n"
+        "3️⃣ 内联搜索：在任意聊天输入 <code>@XiOuDi163_bot 歌曲名</code>\n\n"
         "💡 示例：\n"
         "• /play 邓紫棋 泡沫\n"
         "• /playlist 3778678\n"
-        "• @XiOuDi63_bot 邓紫棋 泡沫\n\n"
+        "• @XiOuDi163_bot 邓紫棋 泡沫\n\n"
         "输入 /help 查看更多帮助"
     )
 
@@ -510,7 +510,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎵 <b>搜索与播放</b>\n"
         "• /play 关键词 — 搜索歌曲\n"
         "• /playlist 歌单ID/链接 — 播放网易云歌单（仅限私聊）\n"
-        "• 内联模式：@XiOuDi63_bot 关键词 — 在任意对话中搜索分享\n\n"
+        "• 内联模式：@XiOuDi163_bot 关键词 — 在任意对话中搜索分享\n\n"
         "🔧 <b>其他</b>\n"
         "• /start — 开始\n"
         "• /help — 显示此帮助\n\n"
@@ -548,7 +548,7 @@ async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📢 命令已更新！\n\n"
         "请使用 <b>/play</b> 搜索歌曲，例如：\n"
         "<code>/play 邓紫棋 泡沫</code>\n\n"
-        "内联搜索：@XiOuDi63_bot 歌曲名",
+        "内联搜索：@XiOuDi163_bot 歌曲名",
         parse_mode="HTML"
     )
 
@@ -766,7 +766,7 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 仅限私聊使用
     if chat and chat.type != "private":
-        await update.message.reply_text("⚠️ /playlist 命令仅在与 Bot 私聊中有效。\n\n请在私聊中使用此命令，或使用内联搜索 @XiOuDi63_bot 歌曲名 在群组中分享音乐。")
+        await update.message.reply_text("⚠️ /playlist 命令仅在与 Bot 私聊中有效。\n\n请在私聊中使用此命令，或使用内联搜索 @XiOuDi163_bot 歌曲名 在群组中分享音乐。")
         return
 
     if _is_banned(user.id):
