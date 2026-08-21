@@ -427,6 +427,32 @@ async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _do_search(update, context, keyword)
 
 
+async def cmd_music_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/music 旧命令提示：告知用户命令已更改为 /play"""
+    user = update.effective_user
+    user_label = f"{user.username or user.first_name or user.id}"
+    logger.info(f"/music(旧命令) 用户={user_label}(id={user.id}) 提示已更改为/play")
+
+    if context.args:
+        keyword = " ".join(context.args).strip()
+        await update.message.reply_text(
+            f"⚠️ 命令已更新！\n\n"
+            f"/music 已更改为 /play\n\n"
+            f"请使用：<code>/play {keyword}</code>\n\n"
+            f"（已自动为你搜索「{keyword}」）",
+            parse_mode="HTML"
+        )
+        await _do_search(update, context, keyword)
+    else:
+        await update.message.reply_text(
+            "⚠️ 命令已更新！\n\n"
+            "/music 已更改为 /play\n\n"
+            "请使用：<code>/play 歌曲名</code>\n\n"
+            "例如：<code>/play 邓紫棋 泡沫</code>",
+            parse_mode="HTML"
+        )
+
+
 async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword: str):
     """执行搜索并展示结果按钮（分页）"""
     status_msg = await update.message.reply_text(f"🔍 正在搜索「{keyword}」...")
@@ -2684,6 +2710,7 @@ def main():
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("play", cmd_play))
+    application.add_handler(CommandHandler("music", cmd_music_legacy))
     application.add_handler(CommandHandler("playlist", cmd_playlist))
     application.add_handler(CommandHandler("admin", cmd_admin))
     application.add_handler(CommandHandler("addadmin", cmd_add_admin))
