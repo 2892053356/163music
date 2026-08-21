@@ -210,7 +210,7 @@ class UpstashDB:
 
     def clear_all_file_ids(self) -> int:
         """清除所有file_id缓存，返回删除数量"""
-        keys = self._exec("KEYS", "cache:file_id:*")
+        keys = self.scan_keys("cache:file_id:*")
         if not keys:
             return 0
         count = 0
@@ -218,6 +218,30 @@ class UpstashDB:
             self._exec("DEL", k)
             count += 1
         return count
+
+    def scan_keys(self, pattern: str, count: int = 500) -> list:
+        """使用SCAN命令获取所有匹配的键（替代KEYS命令，Upstash REST API的KEYS有bug）"""
+        all_keys = []
+        cursor = "0"
+        while True:
+            result = self._exec("SCAN", cursor, "MATCH", pattern, "COUNT", str(count))
+            if not result:
+                break
+            # SCAN返回 [next_cursor, [key1, key2, ...]]
+            if isinstance(result, list) and len(result) >= 2:
+                cursor = str(result[0])
+                batch_keys = result[1] if isinstance(result[1], list) else []
+                all_keys.extend(batch_keys)
+                if cursor == "0":
+                    break
+            else:
+                break
+        return all_keys
+
+    def count_file_ids(self) -> int:
+        """统计已缓存的file_id数量（使用SCAN命令）"""
+        keys = self.scan_keys("cache:file_id:*")
+        return len(keys)
 
     # ---- 管理员管理（主管理员来自环境变量，附加管理员存Redis） ----
     def get_admins(self) -> list:
