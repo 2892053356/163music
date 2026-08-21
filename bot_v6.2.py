@@ -165,6 +165,14 @@ _processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
 # 内联搜索 > 普通搜索 > 歌单播放 > 闲时缓存
 active_search_plays = set()  # 当前正在进行搜索播放的用户ID集合
 
+# 歌单播放队列（用户已有歌单播放时，新歌单加入排队）
+# key: user_id, value: [(playlist_id, songs), ...] 待播放歌单列表
+playlist_queue = {}
+
+# 歌单播放已发送歌曲记录（去重：5秒内不能发送给同一用户相同歌曲）
+# key: user_id, value: {song_id: timestamp} 最近发送的歌曲及时间戳
+playlist_sent_songs = {}
+
 # 闲时自动缓存状态
 auto_cache_running = False  # 是否正在执行自动缓存
 auto_cache_enabled = True   # 自动缓存开关
@@ -541,8 +549,13 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
     """执行搜索并展示结果按钮（分页）"""
     status_msg = await update.message.reply_text(f"🔍 正在搜索「{keyword}」...")
 
+    # 群组中只请求15条，私聊请求50条
+    chat = update.effective_chat
+    is_group = chat and chat.type in ("group", "supergroup")
+    search_limit = 15 if is_group else 50
+
     try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, 50)
+        songs = await asyncio.to_thread(api.search_songs_simple, keyword, search_limit)
     except Exception as e:
         logger.error(f"搜索失败: {e}")
         await status_msg.edit_text("❌ 搜索失败，请稍后重试。")
@@ -613,7 +626,7 @@ async def _render_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ============================================================
 
 PLAYLIST_PAGE_SIZE = 10
-PLAYLIST_MAX_SONGS = 1000  # 获取歌单完整列表（最多1000首）
+PLAYLIST_MAX_SONGS = 10000  # 获取歌单完整列表（最多10000首，超过部分分批获取详情）
 
 
 def _extract_playlist_id(text: str) -> int:
@@ -730,16 +743,48 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
 
     chat_id = update.callback_query.message.chat_id
     user_id = update.callback_query.from_user.id
-    await update.callback_query.edit_message_text(f"▶️ 开始全部播放 {len(songs)} 首歌曲...")
+
+    # 排队机制：如果用户已有正在播放的歌单，将新歌单加入队列
+    existing = db.get_active_playlist(user_id)
+    if existing:
+        global playlist_queue
+        if user_id not in playlist_queue:
+            playlist_queue[user_id] = []
+        playlist_queue[user_id].append((playlist_id, songs))
+        queue_pos = len(playlist_queue[user_id])
+        current_pl = existing.get("playlist_id", "?")
+        current_idx = existing.get("current_index", 0)
+        current_total = existing.get("total", 0)
+        await update.callback_query.edit_message_text(
+            f"📋 歌单已加入播放队列！\n\n"
+            f"当前正在播放：歌单 {current_pl}（进度 {current_idx}/{current_total}）\n"
+            f"你的排队位置：第 {queue_pos} 个\n\n"
+            f"前面的歌单播放完后会自动开始播放这个歌单。"
+        )
+        logger.info(f"歌单排队：用户={user_id} 新歌单={playlist_id}({len(songs)}首) 队列位置={queue_pos}")
+        return
+
+    # 分批次播放：超过1000首时提示用户
+    BATCH_SIZE = 1000
+    total_songs = len(songs)
+    total_batches = (total_songs + BATCH_SIZE - 1) // BATCH_SIZE
+
+    if total_songs > BATCH_SIZE:
+        await update.callback_query.edit_message_text(
+            f"▶️ 歌单共 {total_songs} 首，将分 {total_batches} 批次播放（每批 {BATCH_SIZE} 首）...\n\n"
+            f"第 1/{total_batches} 批开始播放..."
+        )
+    else:
+        await update.callback_query.edit_message_text(f"▶️ 开始全部播放 {total_songs} 首歌曲...")
 
     # 保存播放状态到Redis（从第0首开始）
     db.save_active_playlist(user_id, playlist_id, songs, 0)
-    logger.info(f"歌单播放：用户={user_id} 歌单={playlist_id} 共{len(songs)}首，开始播放（状态已持久化）")
+    logger.info(f"歌单播放：用户={user_id} 歌单={playlist_id} 共{total_songs}首，{total_batches}批次，开始播放（状态已持久化）")
 
     async def _send_all():
         success = 0
         failed = 0
-        start_idx = 0
+        current_batch = 1
         for idx, song in enumerate(songs, 1):
             # 检查管理员停止标志
             if db.check_playlist_stop_flag(user_id):
@@ -764,6 +809,17 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     db.remove_active_playlist(user_id)
                     return
             try:
+                # 5秒去重：同一用户5秒内不能发送相同歌曲
+                global playlist_sent_songs
+                now = time.time()
+                if user_id not in playlist_sent_songs:
+                    playlist_sent_songs[user_id] = {}
+                last_sent = playlist_sent_songs[user_id].get(song["id"], 0)
+                if now - last_sent < 5:
+                    logger.info(f"歌单播放去重：用户={user_id} 歌曲={song['name']}({song['id']}) 5秒内已发送，跳过")
+                    db.update_playlist_index(user_id, idx)
+                    continue
+
                 cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
                 if cached:
@@ -795,6 +851,8 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     )
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
+                # 记录发送时间戳（5秒去重）
+                playlist_sent_songs[user_id][song["id"]] = time.time()
                 success += 1
                 # 更新播放进度到Redis（每首完成后更新）
                 db.update_playlist_index(user_id, idx)
@@ -804,15 +862,182 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 db.update_playlist_index(user_id, idx)
             await asyncio.sleep(1)  # 中等优先级，间隔1秒
 
+            # 分批次进度提示：每完成一批（1000首）发送进度
+            if total_songs > BATCH_SIZE and idx % BATCH_SIZE == 0:
+                current_batch = idx // BATCH_SIZE
+                remaining = total_songs - idx
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📊 第 {current_batch}/{total_batches} 批播放完成！\n"
+                         f"已播放 {idx}/{total_songs} 首（成功{success}，失败{failed}）\n"
+                         f"剩余 {remaining} 首，3秒后继续下一批..."
+                )
+                await asyncio.sleep(3)  # 批次间短暂暂停
+                if current_batch < total_batches:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"▶️ 第 {current_batch + 1}/{total_batches} 批开始播放..."
+                    )
+
         # 播放完成，移除状态
         db.remove_active_playlist(user_id)
         logger.info(f"歌单播放完成：用户={user_id} 歌单={playlist_id} 成功{success}首，失败{failed}首")
+        if total_songs > BATCH_SIZE:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ 歌单全部播放完成！共 {total_batches} 批，成功{success}首，失败{failed}首。"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ 歌单播放完成！成功{success}首，失败{failed}首。"
+            )
+
+        # 检查播放队列，自动播放下一个歌单
+        global playlist_queue
+        if user_id in playlist_queue and playlist_queue[user_id]:
+            next_playlist_id, next_songs = playlist_queue[user_id].pop(0)
+            if not playlist_queue[user_id]:
+                del playlist_queue[user_id]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📋 队列中下一个歌单开始播放：歌单 {next_playlist_id}（共{len(next_songs)}首）"
+            )
+            logger.info(f"歌单队列播放：用户={user_id} 下一个歌单={next_playlist_id}({len(next_songs)}首)")
+            # 递归播放下一个歌单
+            await _play_playlist_all_queue(context, chat_id, user_id, next_playlist_id, next_songs)
+
+    asyncio.create_task(_send_all())
+
+
+async def _play_playlist_all_queue(context, chat_id: int, user_id: int, playlist_id: int, songs: list):
+    """队列播放：自动播放队列中的下一个歌单（无需callback_query）"""
+    BATCH_SIZE = 1000
+    total_songs = len(songs)
+    total_batches = (total_songs + BATCH_SIZE - 1) // BATCH_SIZE
+
+    # 保存播放状态
+    db.save_active_playlist(user_id, playlist_id, songs, 0)
+    logger.info(f"歌单队列播放：用户={user_id} 歌单={playlist_id} 共{total_songs}首，{total_batches}批次，开始播放")
+
+    async def _send_queue():
+        global playlist_queue, playlist_sent_songs
+        success = 0
+        failed = 0
+        for idx, song in enumerate(songs, 1):
+            # 检查管理员停止标志
+            if db.check_playlist_stop_flag(user_id):
+                logger.info(f"歌单队列播放：用户={user_id} 被管理员停止，已播放{idx-1}首")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
+                )
+                db.remove_active_playlist(user_id)
+                # 清空队列
+                if user_id in playlist_queue:
+                    del playlist_queue[user_id]
+                return
+            # 优先级控制
+            while time.time() - last_user_activity < 3 or active_search_plays:
+                await asyncio.sleep(2)
+                if db.check_playlist_stop_flag(user_id):
+                    logger.info(f"歌单队列播放：用户={user_id} 被管理员停止（暂停中），已播放{idx-1}首")
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
+                    )
+                    db.remove_active_playlist(user_id)
+                    if user_id in playlist_queue:
+                        del playlist_queue[user_id]
+                    return
+            try:
+                # 5秒去重
+                now = time.time()
+                if user_id not in playlist_sent_songs:
+                    playlist_sent_songs[user_id] = {}
+                last_sent = playlist_sent_songs[user_id].get(song["id"], 0)
+                if now - last_sent < 5:
+                    logger.info(f"歌单队列去重：用户={user_id} 歌曲={song['name']}({song['id']}) 5秒内已发送，跳过")
+                    db.update_playlist_index(user_id, idx)
+                    continue
+
+                cached = db.get_file_id(song["id"])
+                caption = _song_caption(song)
+                if cached:
+                    await context.bot.send_audio(
+                        chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
+                    )
+                else:
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
+                    if not url:
+                        failed += 1
+                        db.update_playlist_index(user_id, idx)
+                        continue
+                    resp = await asyncio.to_thread(requests_get, url, 45)
+                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                        failed += 1
+                        db.update_playlist_index(user_id, idx)
+                        continue
+                    audio_bytes = io.BytesIO(resp.content)
+                    audio_bytes = _tag_mp3(audio_bytes, song)
+                    msg = await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_bytes,
+                        filename=f"{song['name']}.mp3",
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=caption,
+                        parse_mode="HTML",
+                        duration=song["duration"] // 1000 if song["duration"] else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
+                playlist_sent_songs[user_id][song["id"]] = time.time()
+                success += 1
+                db.update_playlist_index(user_id, idx)
+            except Exception as e:
+                logger.warning(f"歌单队列播放失败 {song['name']}: {e}")
+                failed += 1
+                db.update_playlist_index(user_id, idx)
+            await asyncio.sleep(1)
+
+            # 分批次进度提示
+            if total_songs > BATCH_SIZE and idx % BATCH_SIZE == 0:
+                current_batch = idx // BATCH_SIZE
+                remaining = total_songs - idx
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📊 第 {current_batch}/{total_batches} 批播放完成！\n"
+                         f"已播放 {idx}/{total_songs} 首（成功{success}，失败{failed}）\n"
+                         f"剩余 {remaining} 首，3秒后继续下一批..."
+                )
+                await asyncio.sleep(3)
+                if current_batch < total_batches:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"▶️ 第 {current_batch + 1}/{total_batches} 批开始播放..."
+                    )
+
+        # 播放完成
+        db.remove_active_playlist(user_id)
+        logger.info(f"歌单队列播放完成：用户={user_id} 歌单={playlist_id} 成功{success}首，失败{failed}首")
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"✅ 歌单播放完成！成功{success}首，失败{failed}首。"
         )
 
-    asyncio.create_task(_send_all())
+        # 继续播放队列中的下一个
+        if user_id in playlist_queue and playlist_queue[user_id]:
+            next_playlist_id, next_songs = playlist_queue[user_id].pop(0)
+            if not playlist_queue[user_id]:
+                del playlist_queue[user_id]
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📋 队列中下一个歌单开始播放：歌单 {next_playlist_id}（共{len(next_songs)}首）"
+            )
+            await _play_playlist_all_queue(context, chat_id, user_id, next_playlist_id, next_songs)
+
+    asyncio.create_task(_send_queue())
 
 
 async def _resume_playlist_play(application, user_id: int, playlist_id: int, songs: list, start_index: int, total: int):
