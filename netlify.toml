@@ -16,16 +16,12 @@
 # 首页重定向到 GitHub
 [[redirects]]
   from = "/"
-  to = "https://github.com/XiOuDi/163music"
+  to = "https://github.com/XiOuDi/163music-netlify-proxy"
   status = 302
 
 # 函数配置
 [functions]
   # 函数目录
   directory = "netlify/functions"
-  # 函数超时（秒），免费版最大10秒
-  timeout = 10
-
-# 函数特定配置
-[functions."audio-proxy"]
-  timeout = 10
+  # 注意：Netlify Functions 免费版默认超时10秒，无需在配置中设置
+  # 如需修改超时，请在 Netlify Dashboard → Site settings → Functions 中设置
