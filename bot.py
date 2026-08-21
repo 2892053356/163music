@@ -446,8 +446,15 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
     """执行搜索并展示结果按钮（分页）"""
     status_msg = await update.message.reply_text(f"🔍 正在搜索「{keyword}」...")
 
+    # 根据聊天类型设置搜索结果数量：群组20首，私聊50首
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        search_limit = 20
+    else:
+        search_limit = 50
+
     try:
-        songs = await asyncio.to_thread(api.search_songs_simple, keyword, 50)
+        songs = await asyncio.to_thread(api.search_songs_simple, keyword, search_limit)
     except Exception as e:
         logger.error(f"搜索失败: {e}")
         await status_msg.edit_text("❌ 搜索失败，请稍后重试。")
