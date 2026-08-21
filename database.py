@@ -243,6 +243,32 @@ class UpstashDB:
         result = self._exec("SISMEMBER", "bot:admins", str(user_id))
         return bool(result)
 
+    # ---- 配置管理（存储在Redis，可从database读取环境变量）----
+    def get_config(self, key: str) -> str:
+        """从Redis获取配置值"""
+        result = self._exec("HGET", "bot:config", key)
+        return result if result else ""
+
+    def set_config(self, key: str, value: str):
+        """设置配置值到Redis"""
+        self._exec("HSET", "bot:config", key, value)
+
+    def get_all_config(self) -> dict:
+        """获取所有配置"""
+        result = self._exec("HGETALL", "bot:config")
+        if result and isinstance(result, list) and len(result) >= 2:
+            # Redis HGETALL 返回 [key1, value1, key2, value2, ...]
+            config_dict = {}
+            for i in range(0, len(result), 2):
+                if i + 1 < len(result):
+                    config_dict[result[i]] = result[i + 1]
+            return config_dict
+        return {}
+
+    def delete_config(self, key: str):
+        """删除配置值"""
+        self._exec("HDEL", "bot:config", key)
+
 
 # 全局实例
 db = UpstashDB()

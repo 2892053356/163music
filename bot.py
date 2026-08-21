@@ -1706,6 +1706,11 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎵 <b>音质设置</b>\n"
         "📋 /quality — 查看当前音质\n"
         "✏️ /setquality standard|higher — 设置音质（普通VIP支持standard/higher）\n\n"
+        "⚙️ <b>配置管理（Database）</b>\n"
+        "📋 /setconfig — 查看所有Database配置\n"
+        "📋 /setconfig KEY — 查看单个配置\n"
+        "✏️ /setconfig KEY VALUE — 设置配置到Database（重启后生效）\n"
+        "🗑️ /delconfig KEY — 删除Database中的配置\n\n"
         "🔄 <b>服务管理</b>\n"
         "🔁 /restart — 重启Render服务（每8小时自动重启一次）\n"
         "📊 /cachetop — 预热热歌榜前100首缓存\n"
@@ -1755,6 +1760,80 @@ async def cmd_setquality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.set_quality(quality)
     quality_name = {"standard": "标准", "higher": "较高"}.get(quality, quality)
     await update.message.reply_text(f"✅ 音质已设置为 <b>{quality}</b>（{quality_name}）", parse_mode="HTML")
+
+
+async def cmd_setconfig(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员设置配置到Database（重启后生效）"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    if not db.enabled:
+        await update.message.reply_text("❌ Database未启用，请先设置UPSTASH连接信息。")
+        return
+
+    args = context.args
+    if not args:
+        # 查看所有配置
+        all_config = db.get_all_config()
+        if not all_config:
+            await update.message.reply_text("📋 Database中暂无配置，当前使用环境变量。")
+            return
+        text = "📋 <b>Database配置列表</b>\n\n"
+        for k, v in sorted(all_config.items()):
+            if k in ("BOT_TOKEN", "NETEASE_COOKIE"):
+                display_v = v[:8] + "..." + v[-4:] if len(v) > 12 else "***"
+            else:
+                display_v = v
+            text += f"• <code>{k}</code> = {display_v}\n"
+        text += "\n💡 设置：/setconfig KEY VALUE\n删除：/delconfig KEY\n重启后生效"
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+
+    key = args[0].upper()
+    if len(args) < 2:
+        # 查看单个配置
+        value = db.get_config(key)
+        if not value:
+            await update.message.reply_text(f"📋 配置 <code>{key}</code> 不存在", parse_mode="HTML")
+            return
+        if key in ("BOT_TOKEN", "NETEASE_COOKIE"):
+            display_v = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
+        else:
+            display_v = value
+        await update.message.reply_text(f"📋 <code>{key}</code> = {display_v}", parse_mode="HTML")
+        return
+
+    # 设置配置
+    value = " ".join(args[1:])
+    db.set_config(key, value)
+    if key in ("BOT_TOKEN", "NETEASE_COOKIE"):
+        display_v = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
+    else:
+        display_v = value
+    await update.message.reply_text(
+        f"✅ 配置已保存到Database\n\n"
+        f"<code>{key}</code> = {display_v}\n\n"
+        f"⚠️ 重启bot后生效，或使用 /restart 重启服务",
+        parse_mode="HTML"
+    )
+
+
+async def cmd_delconfig(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员删除Database中的配置"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    if not db.enabled:
+        await update.message.reply_text("❌ Database未启用。")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/delconfig KEY")
+        return
+    key = context.args[0].upper()
+    db.delete_config(key)
+    await update.message.reply_text(f"✅ 配置 <code>{key}</code> 已从Database删除，重启后将使用环境变量", parse_mode="HTML")
 
 
 async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2483,6 +2562,63 @@ def main():
     print("  🎵 网易云音乐 Telegram Bot 启动中...")
     print("=" * 50)
 
+    # 从Database读取配置（如果Database可用），覆盖环境变量
+    config_source = "环境变量"
+    if db.enabled:
+        try:
+            db_config = db.get_all_config()
+            if db_config:
+                print(f"📦 从Database读取配置: {len(db_config)} 项")
+                config_source = "Database"
+                # 覆盖配置
+                if db_config.get("BOT_TOKEN"):
+                    config.BOT_TOKEN = db_config["BOT_TOKEN"]
+                    print("  ✅ BOT_TOKEN: 从Database加载")
+                if db_config.get("NETEASE_COOKIE"):
+                    config.NETEASE_COOKIE = db_config["NETEASE_COOKIE"]
+                    print("  ✅ NETEASE_COOKIE: 从Database加载")
+                if db_config.get("ADMIN_ID"):
+                    try:
+                        config.ADMIN_ID = int(db_config["ADMIN_ID"])
+                        print(f"  ✅ ADMIN_ID: 从Database加载 ({config.ADMIN_ID})")
+                    except ValueError:
+                        pass
+                if db_config.get("MUSIC_QUALITY"):
+                    config.MUSIC_QUALITY = db_config["MUSIC_QUALITY"]
+                    print(f"  ✅ MUSIC_QUALITY: 从Database加载 ({config.MUSIC_QUALITY})")
+                if db_config.get("INLINE_RESULTS_LIMIT"):
+                    try:
+                        config.INLINE_RESULTS_LIMIT = int(db_config["INLINE_RESULTS_LIMIT"])
+                        print(f"  ✅ INLINE_RESULTS_LIMIT: 从Database加载 ({config.INLINE_RESULTS_LIMIT})")
+                    except ValueError:
+                        pass
+                if db_config.get("SEARCH_RESULTS_LIMIT"):
+                    try:
+                        config.SEARCH_RESULTS_LIMIT = int(db_config["SEARCH_RESULTS_LIMIT"])
+                        print(f"  ✅ SEARCH_RESULTS_LIMIT: 从Database加载 ({config.SEARCH_RESULTS_LIMIT})")
+                    except ValueError:
+                        pass
+                if db_config.get("CF_PROXY_URL"):
+                    config.CF_PROXY_URL = db_config["CF_PROXY_URL"]
+                    print("  ✅ CF_PROXY_URL: 从Database加载")
+                if db_config.get("PROXY_URL"):
+                    config.PROXY_URL = db_config["PROXY_URL"]
+                    print("  ✅ PROXY_URL: 从Database加载")
+                if db_config.get("DEFAULT_WELCOME"):
+                    config.DEFAULT_WELCOME = db_config["DEFAULT_WELCOME"]
+                    print("  ✅ DEFAULT_WELCOME: 从Database加载")
+            else:
+                print("📦 Database中无配置，使用环境变量")
+        except Exception as e:
+            print(f"⚠️ 从Database读取配置失败: {e}，使用环境变量")
+    else:
+        print("📦 Database未启用（未设置UPSTASH连接信息），使用环境变量")
+
+    print(f"📋 配置来源: {config_source}")
+    print(f"🤖 BOT_TOKEN: {'✅ 已设置' if config.BOT_TOKEN else '❌ 未设置'}")
+    print(f"🍪 NETEASE_COOKIE: {'✅ 已设置' if config.NETEASE_COOKIE else '❌ 未设置'}")
+    print(f"👑 ADMIN_ID: {config.ADMIN_ID}")
+
     # 构建 Application，设置长超时（上传音频需要较长的 write_timeout）
     builder = ApplicationBuilder().token(config.BOT_TOKEN)
     request_kwargs = dict(
@@ -2521,6 +2657,8 @@ def main():
     application.add_handler(CommandHandler("refreshcookie", cmd_refreshcookie))
     application.add_handler(CommandHandler("quality", cmd_quality))
     application.add_handler(CommandHandler("setquality", cmd_setquality))
+    application.add_handler(CommandHandler("setconfig", cmd_setconfig))
+    application.add_handler(CommandHandler("delconfig", cmd_delconfig))
     application.add_handler(CommandHandler("restart", cmd_restart))
     application.add_handler(CommandHandler("cachetop", cmd_cachetop))
     application.add_handler(CommandHandler("autocache", cmd_autocache))
