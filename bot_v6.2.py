@@ -1935,6 +1935,40 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await asyncio.to_thread(db.incr_search)
 
+    # 方案A：异步预取前3首歌的音频直链，缓存到Upstash（代理函数优先读缓存，响应速度从2-5秒降到<0.5秒）
+    if songs:
+        async def _prefetch_audio_urls():
+            try:
+                quality = config.MUSIC_QUALITY
+                prefetch_count = min(3, len(songs))
+                logger.info(f"内联搜索 开始预取{prefetch_count}首歌的音频直链...")
+                for i in range(prefetch_count):
+                    song = songs[i]
+                    song_id = song["id"]
+                    try:
+                        # 检查Upstash是否已有缓存
+                        cache_key = f"audio_url:{song_id}:{quality}"
+                        cached = db._exec("GET", cache_key)
+                        if cached:
+                            logger.info(f"内联搜索 预取跳过（已有缓存）: {song['name']}")
+                            continue
+                        # 调用网易云API获取音频直链
+                        url = await asyncio.to_thread(api.get_first_song_url, song_id, quality)
+                        if url:
+                            # 缓存到Upstash（10分钟过期，网易云直链通常20分钟过期）
+                            db._exec("SET", cache_key, url)
+                            db._exec("EXPIRE", cache_key, 600)
+                            logger.info(f"内联搜索 预取成功: {song['name']} -> {url[:60]}...")
+                        else:
+                            logger.info(f"内联搜索 预取失败（无直链）: {song['name']}")
+                    except Exception as e:
+                        logger.warning(f"内联搜索 预取异常: {song['name']} - {e}")
+                logger.info(f"内联搜索 预取完成")
+            except Exception as e:
+                logger.warning(f"内联搜索 预取任务异常: {e}")
+        # 异步执行预取，不阻塞内联搜索结果返回
+        asyncio.create_task(_prefetch_audio_urls())
+
     if not songs:
         results = [
             InlineQueryResultArticle(
