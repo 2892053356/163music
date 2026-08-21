@@ -577,6 +577,7 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
     # 存储搜索结果到user_data，供分页使用
     context.user_data["search_songs"] = songs
     context.user_data["search_keyword"] = keyword
+    context.user_data["search_is_group"] = is_group
 
     await _render_search_page(update, context, 0, status_msg)
 
@@ -585,7 +586,9 @@ async def _render_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE
     """渲染搜索结果的某一页"""
     songs = context.user_data.get("search_songs", [])
     keyword = context.user_data.get("search_keyword", "")
-    page_size = 10
+    is_group = context.user_data.get("search_is_group", False)
+    # 群组每页5条（15条分3页），私聊每页10条
+    page_size = 5 if is_group else 10
     total = len(songs)
     total_pages = (total + page_size - 1) // page_size
     page = max(0, min(page, total_pages - 1))
