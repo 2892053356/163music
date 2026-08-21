@@ -1621,12 +1621,12 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     inline_request_active += 1
     logger.info(f"内联请求 活跃计数+1 = {inline_request_active}")
 
-    # 延迟减少计数的辅助函数（内联结果返回后30秒，给用户选择和发送音频的时间）
+    # 延迟减少计数的辅助函数（内联结果返回后10秒，给用户选择和发送音频的时间）
     async def _dec_inline_active():
-        await asyncio.sleep(30)
+        await asyncio.sleep(10)
         global inline_request_active
         inline_request_active = max(0, inline_request_active - 1)
-        logger.info(f"内联请求 活跃计数-1 = {inline_request_active}（30秒延迟后）")
+        logger.info(f"内联请求 活跃计数-1 = {inline_request_active}（10秒延迟后）")
 
     keyword = query.query.strip()
     if not keyword:
