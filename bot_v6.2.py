@@ -161,6 +161,10 @@ last_user_activity = 0
 inline_last_query = {}  # user_id -> (query, timestamp) 用于内联搜索防抖
 _processed_update_ids = set()  # 去重：防止Telegram重试导致重复处理
 
+# 内联请求活跃计数（优先级控制：有内联请求时暂停歌单缓存和闲时缓存）
+# 内联请求开始时+1，内联结果返回后延迟30秒-1（给用户选择结果和发送音频的时间）
+inline_request_active = 0
+
 # 搜索播放活动集合（优先级控制：用户搜索播放时暂停歌单播放）
 # 内联搜索 > 普通搜索 > 歌单播放 > 闲时缓存
 active_search_plays = set()  # 当前正在进行搜索播放的用户ID集合
@@ -1652,11 +1656,23 @@ async def _send_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE, song_
 # ============================================================
 
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global inline_request_active
     query = update.inline_query
     user = query.from_user
 
     if await asyncio.to_thread(_is_banned, user.id):
         return
+
+    # 内联请求开始，增加活跃计数（暂停歌单缓存和闲时缓存）
+    inline_request_active += 1
+    logger.info(f"内联请求 活跃计数+1 = {inline_request_active}")
+
+    # 延迟减少计数的辅助函数（内联结果返回后30秒，给用户选择和发送音频的时间）
+    async def _dec_inline_active():
+        await asyncio.sleep(30)
+        global inline_request_active
+        inline_request_active = max(0, inline_request_active - 1)
+        logger.info(f"内联请求 活跃计数-1 = {inline_request_active}（30秒延迟后）")
 
     keyword = query.query.strip()
     if not keyword:
@@ -1671,6 +1687,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         ]
         await query.answer(results, cache_time=1)
+        asyncio.create_task(_dec_inline_active())
         return
 
     # 防抖：纯字母输入（4-8位等待800ms防抖，期间有新输入则跳过）
@@ -1751,6 +1768,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         ]
         await query.answer(results, cache_time=0, is_personal=True)
+        asyncio.create_task(_dec_inline_active())
         return
 
     # 使用代理端点，无需预获取播放地址，直接用所有搜索结果
@@ -1840,8 +1858,10 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         await query.answer(results, cache_time=0, is_personal=True)
+        asyncio.create_task(_dec_inline_active())
     except Exception as e:
         logger.error(f"内联搜索answer失败 用户={user_label}(id={user.id}) 关键词='{keyword}' 结果数={len(results)}: {e}")
+        inline_request_active = max(0, inline_request_active - 1)
         raise
 
 
@@ -2446,9 +2466,16 @@ async def cmd_cachetop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = 0
             failed = 0
             for idx, song in enumerate(to_cache, 1):
-                # 最低优先级：最近5秒有用户活动则暂停
-                while time.time() - last_user_activity < 5:
+                # 最低优先级：最近5秒有用户活动 或 有内联请求活跃 则暂停
+                _paused_now = False
+                while time.time() - last_user_activity < 5 or inline_request_active > 0:
+                    if not _paused_now:
+                        _reason = f"内联请求活跃({inline_request_active}个)" if inline_request_active > 0 else "用户活动"
+                        logger.info(f"歌单缓存：⏸️ 检测到{_reason}，暂停缓存（当前{idx}/{len(to_cache)}）")
+                        _paused_now = True
                     await asyncio.sleep(2)
+                if _paused_now:
+                    logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
                     # 获取播放地址
@@ -2586,9 +2613,16 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = 0
             failed = 0
             for idx, song in enumerate(to_cache, 1):
-                # 最低优先级：最近5秒有用户活动则暂停
-                while time.time() - last_user_activity < 5:
+                # 最低优先级：最近5秒有用户活动 或 有内联请求活跃 则暂停
+                _paused_now = False
+                while time.time() - last_user_activity < 5 or inline_request_active > 0:
+                    if not _paused_now:
+                        _reason = f"内联请求活跃({inline_request_active}个)" if inline_request_active > 0 else "用户活动"
+                        logger.info(f"歌单缓存：⏸️ 检测到{_reason}，暂停缓存（当前{idx}/{len(to_cache)}）")
+                        _paused_now = True
                     await asyncio.sleep(2)
+                if _paused_now:
+                    logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
                     url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
@@ -2720,9 +2754,16 @@ async def cmd_cacheuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = 0
             failed = 0
             for idx, song in enumerate(to_cache, 1):
-                # 最低优先级：最近5秒有用户活动则暂停
-                while time.time() - last_user_activity < 5:
+                # 最低优先级：最近5秒有用户活动 或 有内联请求活跃 则暂停
+                _paused_now = False
+                while time.time() - last_user_activity < 5 or inline_request_active > 0:
+                    if not _paused_now:
+                        _reason = f"内联请求活跃({inline_request_active}个)" if inline_request_active > 0 else "用户活动"
+                        logger.info(f"歌单缓存：⏸️ 检测到{_reason}，暂停缓存（当前{idx}/{len(to_cache)}）")
+                        _paused_now = True
                     await asyncio.sleep(2)
+                if _paused_now:
+                    logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
                     url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
@@ -3266,16 +3307,21 @@ def main():
                     _paused_count = 0
                     _interrupted = False
                     for idx, song in enumerate(to_cache, 1):
-                        # 最低优先级：最近10秒有用户活动则暂停
+                        # 最低优先级：最近10秒有用户活动 或 有内联请求活跃 则暂停
                         _paused = False
-                        while time.time() - last_user_activity < 10:
+                        _pause_reason = ""
+                        while time.time() - last_user_activity < 10 or inline_request_active > 0:
                             if not _paused:
-                                logger.info(f"闲时缓存：⏸️ 检测到用户活动，暂停缓存（当前{idx}/{len(to_cache)}）")
+                                if inline_request_active > 0:
+                                    _pause_reason = f"内联请求活跃({inline_request_active}个)"
+                                else:
+                                    _pause_reason = "用户活动"
+                                logger.info(f"闲时缓存：⏸️ 检测到{_pause_reason}，暂停缓存（当前{idx}/{len(to_cache)}）")
                                 _paused = True
                                 _paused_count += 1
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(3)
                         if _paused:
-                            logger.info(f"闲时缓存：▶️ 用户活动结束，恢复缓存")
+                            logger.info(f"闲时缓存：▶️ {_pause_reason}结束，恢复缓存")
                         # 再次检查开关
                         if not auto_cache_enabled:
                             logger.info("闲时缓存：🔕 自动缓存已关闭，停止")
