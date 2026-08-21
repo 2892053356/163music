@@ -4,7 +4,7 @@ Telegram 网易云音乐机器人
   - /start  开始使用
   - /help   帮助
   - /music <关键词>  搜索歌曲（按钮选择播放）
-  - 内联搜索：@机器人用户名 <关键词>
+  - 内联搜索：@XiOuDi63_bot <关键词>
   - 管理员：/admin /broadcast /stats /ban /unban
 """
 
@@ -397,11 +397,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n\n📖 <b>使用方法：</b>\n"
         "1️⃣ /play 歌曲名 — 搜索并播放歌曲\n"
         "2️⃣ /playlist 歌单ID/链接 — 播放网易云歌单（仅限私聊）\n"
-        "3️⃣ 内联搜索：在任意聊天输入 <code>@本机器人用户名 歌曲名</code>\n\n"
+        "3️⃣ 内联搜索：在任意聊天输入 <code>@XiOuDi63_bot 歌曲名</code>\n\n"
         "💡 示例：\n"
         "• /play 邓紫棋 泡沫\n"
         "• /playlist 3778678\n"
-        "• @XiOuDi163_bot 句号\n\n"
+        "• @XiOuDi63_bot 邓紫棋 泡沫\n\n"
         "输入 /help 查看更多帮助"
     )
 
@@ -419,7 +419,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎵 <b>搜索与播放</b>\n"
         "• /play 关键词 — 搜索歌曲\n"
         "• /playlist 歌单ID/链接 — 播放网易云歌单（仅限私聊）\n"
-        "• 内联模式：@机器人用户名 关键词 — 在任意对话中搜索分享\n\n"
+        "• 内联模式：@XiOuDi63_bot 关键词 — 在任意对话中搜索分享\n\n"
         "🔧 <b>其他</b>\n"
         "• /start — 开始\n"
         "• /help — 显示此帮助\n\n"
@@ -442,7 +442,7 @@ async def cmd_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyword = " ".join(context.args).strip()
     if not keyword:
-        await update.message.reply_text("⚠️ 请输入搜索关键词，例如：/play 周杰伦 晴天")
+        await update.message.reply_text("⚠️ 请输入搜索关键词，例如：/play 邓紫棋 泡沫")
         return
 
     _register_user(user.id)
@@ -456,8 +456,8 @@ async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📢 命令已更新！\n\n"
         "请使用 <b>/play</b> 搜索歌曲，例如：\n"
-        "<code>/play 周杰伦 晴天</code>\n\n"
-        "内联搜索：@机器人用户名 歌曲名",
+        "<code>/play 邓紫棋 泡沫</code>\n\n"
+        "内联搜索：@XiOuDi63_bot 歌曲名",
         parse_mode="HTML"
     )
 
@@ -561,7 +561,7 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 仅限私聊使用
     if chat and chat.type != "private":
-        await update.message.reply_text("⚠️ /playlist 命令仅在与 Bot 私聊中有效。\n\n请在私聊中使用此命令，或使用内联搜索 @机器人用户名 歌曲名 在群组中分享音乐。")
+        await update.message.reply_text("⚠️ /playlist 命令仅在与 Bot 私聊中有效。\n\n请在私聊中使用此命令，或使用内联搜索 @XiOuDi63_bot 歌曲名 在群组中分享音乐。")
         return
 
     if _is_banned(user.id):
@@ -1587,6 +1587,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔁 /restart — 重启Render服务（每8小时自动重启一次）\n"
         "📊 /cachetop — 预热热歌榜前100首缓存\n"
         "📋 /cacheplaylist 歌单ID — 缓存指定歌单全部歌曲\n"
+        "👤 /cacheuser 用户ID — 缓存指定网易云账号的所有歌单（漫游歌曲）\n"
         "⏹️ /playliststop — 查看/停止正在播放歌单的用户\n"
         "♻️ /autocache — 开关闲时自动缓存\n"
         "📊 /cachestatus — 查看缓存状态（含立即缓存按钮）\n"
@@ -2276,6 +2277,140 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_do_cache_playlist())
 
 
+async def cmd_cacheuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：缓存指定网易云账号的所有歌单歌曲（漫游歌曲）"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    arg = " ".join(context.args).strip()
+    if not arg:
+        await update.message.reply_text(
+            "⚠️ 用法：/cacheuser <网易云用户ID>\n\n"
+            "获取用户主页链接中的数字ID，例如：\n"
+            "https://music.163.com/#/user/home?id=123456\n"
+            "则用户ID为 123456"
+        )
+        return
+
+    # 尝试从链接中提取用户ID
+    import re
+    uid_match = re.search(r"[?&]id=(\d+)", arg)
+    if uid_match:
+        uid = int(uid_match.group(1))
+    elif arg.isdigit():
+        uid = int(arg)
+    else:
+        await update.message.reply_text("❌ 无法识别用户ID，请输入数字ID或包含id=的用户主页链接。")
+        return
+
+    await update.message.reply_text(f"📊 正在获取网易云用户 {uid} 的所有歌单（漫游歌曲）...")
+
+    async def _do_cache_user():
+        try:
+            # 获取用户歌单列表
+            playlists = await asyncio.to_thread(api.get_user_playlists, uid, limit=100)
+            if not playlists:
+                await context.bot.send_message(config.ADMIN_ID, f"❌ 获取用户 {uid} 歌单失败或用户无公开歌单。")
+                return
+
+            pl_names = [f"{p['name']}({p['trackCount']}首)" for p in playlists[:10]]
+            await context.bot.send_message(
+                config.ADMIN_ID,
+                f"📋 用户 {uid} 共 {len(playlists)} 个歌单：\n" + "\n".join(f"• {n}" for n in pl_names) +
+                (f"\n...（共{len(playlists)}个，仅显示前10个）" if len(playlists) > 10 else "") +
+                "\n\n开始收集并缓存歌曲..."
+            )
+
+            # 收集所有歌单中的歌曲（去重）
+            all_songs = []
+            seen_ids = set()
+            for pl_idx, pl in enumerate(playlists, 1):
+                try:
+                    songs = await asyncio.to_thread(api.get_toplist_songs, pl["id"], 200)
+                    new_count = 0
+                    for s in songs:
+                        if s["id"] not in seen_ids:
+                            seen_ids.add(s["id"])
+                            all_songs.append(s)
+                            new_count += 1
+                    logger.info(f"用户歌单缓存 [{pl_idx}/{len(playlists)}] {pl['name']}: 获取{len(songs)}首，新增{new_count}首")
+                except Exception as e:
+                    logger.warning(f"用户歌单缓存 获取歌单 {pl['name']} 失败: {e}")
+                    continue
+                await asyncio.sleep(0.5)  # 避免请求过快
+
+            # 过滤已缓存的
+            to_cache = []
+            for s in all_songs:
+                if not db.get_file_id(s["id"]):
+                    to_cache.append(s)
+            already = len(all_songs) - len(to_cache)
+
+            await context.bot.send_message(
+                config.ADMIN_ID,
+                f"📊 漫游歌曲收集完成：共{len(all_songs)}首（去重后），已缓存{already}首，待缓存{len(to_cache)}首，开始处理..."
+            )
+
+            if not to_cache:
+                await context.bot.send_message(config.ADMIN_ID, "✅ 所有歌曲已缓存，无需处理。")
+                return
+
+            success = 0
+            failed = 0
+            for idx, song in enumerate(to_cache, 1):
+                # 最低优先级：最近5秒有用户活动则暂停
+                while time.time() - last_user_activity < 5:
+                    await asyncio.sleep(2)
+
+                try:
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
+                    if not url:
+                        failed += 1
+                        continue
+                    resp = await asyncio.to_thread(requests_get, url, 45)
+                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                        failed += 1
+                        continue
+                    audio_bytes = io.BytesIO(resp.content)
+                    audio_bytes = _tag_mp3(audio_bytes, song)
+                    filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
+                    msg = await context.bot.send_audio(
+                        chat_id=config.ADMIN_ID,
+                        audio=audio_bytes,
+                        filename=filename,
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=f"漫游缓存 {idx}/{len(to_cache)}",
+                        duration=song["duration"] // 1000 if song.get("duration") else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
+                        success += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    logger.warning(f"漫游缓存失败 {song['name']}: {e}")
+                    failed += 1
+                if idx % 10 == 0:
+                    await context.bot.send_message(
+                        config.ADMIN_ID,
+                        f"⏳ 漫游缓存进度：{idx}/{len(to_cache)}（成功{success}，失败{failed}）"
+                    )
+                await asyncio.sleep(3)
+
+            await context.bot.send_message(
+                config.ADMIN_ID,
+                f"✅ 漫游歌曲缓存完成！成功{success}首，失败{failed}首，跳过已缓存{already}首。"
+            )
+        except Exception as e:
+            logger.error(f"漫游缓存任务失败: {e}")
+            await context.bot.send_message(config.ADMIN_ID, f"❌ 漫游缓存失败: {e}")
+
+    asyncio.create_task(_do_cache_user())
+
+
 async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员：查看正在播放歌单的用户，并可停止其播放"""
     user = update.effective_user
@@ -2441,6 +2576,7 @@ def main():
     application.add_handler(CommandHandler("autocache", cmd_autocache))
     application.add_handler(CommandHandler("cachestatus", cmd_cachestatus))
     application.add_handler(CommandHandler("cacheplaylist", cmd_cacheplaylist))
+    application.add_handler(CommandHandler("cacheuser", cmd_cacheuser))
     application.add_handler(CommandHandler("playliststop", cmd_playlist_stop))
     application.add_handler(CommandHandler("refreshcache", cmd_refreshcache))
 
