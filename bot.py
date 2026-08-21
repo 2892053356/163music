@@ -649,13 +649,6 @@ async def _show_playlist_page(update: Update, context, playlist_id: int, page: i
 
 async def _play_playlist_all(update: Update, context, playlist_id: int):
     """全部播放：后台逐个发送歌单歌曲（状态持久化到Redis，重启后继续）"""
-    user_id = update.callback_query.from_user.id
-
-    # 检查播放锁：防止同一用户重复播放
-    if db.enabled and db.has_playlist_lock(user_id):
-        await update.callback_query.edit_message_text("⚠️ 您已有歌单正在播放中，请等待播放完成或使用 /playliststop 停止后再播放。")
-        return
-
     chat_id = update.callback_query.message.chat_id
     user_id = update.callback_query.from_user.id
 
@@ -666,6 +659,9 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
             await update.callback_query.answer("⏳ 已有歌单正在播放，请等待完成或使用 /playliststop 停止", show_alert=True)
             return
         logger.info(f"歌单播放：用户={user_id} 获取播放锁 歌单={playlist_id}")
+        # 获取锁后立即清除停止标志，避免之前的停止操作影响新播放
+        if db.check_playlist_stop_flag(user_id):
+            logger.info(f"歌单播放：用户={user_id} 检测到旧停止标志，已清除")
 
     songs = context.user_data.get(f"playlist_{playlist_id}", [])
     if not songs:
@@ -772,6 +768,9 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
             logger.info(f"歌单续播：用户={user_id} 已有播放任务在运行，跳过续播")
             return
         logger.info(f"歌单续播：用户={user_id} 获取播放锁 歌单={playlist_id} 从第{start_index+1}首开始")
+        # 获取锁后立即清除停止标志，避免之前的停止操作影响续播
+        if db.check_playlist_stop_flag(user_id):
+            logger.info(f"歌单续播：用户={user_id} 检测到旧停止标志，已清除")
 
     # 获取application的bot对象
     try:
