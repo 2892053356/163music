@@ -1403,7 +1403,8 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                 )
             elif config.AUDIO_PROXY_URL:
                 # 歌单播放只允许使用代理URL，禁止Render下载
-                proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
+                from urllib.parse import quote
+                proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}&name={quote(song['name'])}"
                 proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
                 
                 # 带重试的发送（最多2次）
