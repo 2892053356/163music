@@ -530,58 +530,105 @@ async def audio_proxy_handler(request):
         return web.Response(status=400, text="Invalid song_id")
 
     try:
-        # 获取播放地址（3秒超时）
-        def _get_url(level):
-            url_result = api.get_song_url([sid], level=level)
-            for item in url_result.get("data", []):
-                if item.get("id") == sid and item.get("url"):
-                    return item["url"]
-            return None
-
-        # 下载音频：每种音质只试1次，连接超时5秒，双音质备用，总时间≤10秒
+        # 三级回退：CF反向代理 → Vercel代理 → 直接从网易云下载
         audio_content = None
-        for try_quality in [quality, "higher"]:
+        _proxy_used = None
+        
+        # 1. 尝试 CF 反向代理
+        if config.CF_PROXY_URL:
             try:
-                play_url = await asyncio.wait_for(
-                    asyncio.to_thread(_get_url, try_quality), timeout=3
+                cf_url = f"{config.CF_PROXY_URL.rstrip('/')}/audio/{sid}?quality={quality}"
+                logger.info(f"代理端点 song_id={sid} 尝试CF反向代理")
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _download_session.get, cf_url,
+                        timeout=(10, 20),
+                        headers={"Referer": "https://music.163.com/"}
+                    ),
+                    timeout=25
                 )
-            except asyncio.TimeoutError:
-                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 获取地址超时")
-                continue
-            if not play_url:
-                continue
-            if play_url.startswith("http://"):
-                play_url = "https://" + play_url[7:]
-            # 每种音质重试1次，连接超时15秒，读取超时30秒，总超时45秒
-            for _retry in range(2):
+                if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
+                    audio_content = resp.content
+                    _proxy_used = "CF反向代理"
+                    logger.info(f"代理端点 song_id={sid} CF反向代理成功 大小={len(audio_content)}bytes")
+            except Exception as e:
+                logger.warning(f"代理端点 song_id={sid} CF反向代理失败: {type(e).__name__}: {e}")
+        
+        # 2. 尝试 Vercel 代理
+        if not audio_content and config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
+            try:
+                vercel_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{sid}?quality={quality}"
+                logger.info(f"代理端点 song_id={sid} 尝试Vercel代理")
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _download_session.get, vercel_url,
+                        timeout=(10, 20),
+                        headers={"Referer": "https://music.163.com/"}
+                    ),
+                    timeout=25
+                )
+                if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
+                    audio_content = resp.content
+                    _proxy_used = "Vercel"
+                    logger.info(f"代理端点 song_id={sid} Vercel代理成功 大小={len(audio_content)}bytes")
+            except Exception as e:
+                logger.warning(f"代理端点 song_id={sid} Vercel代理失败: {type(e).__name__}: {e}")
+        
+        # 3. 直接从网易云下载（最后回退）
+        if not audio_content:
+            logger.info(f"代理端点 song_id={sid} 代理均失败，直接从网易云下载")
+            # 获取播放地址（3秒超时）
+            def _get_url(level):
+                url_result = api.get_song_url([sid], level=level)
+                for item in url_result.get("data", []):
+                    if item.get("id") == sid and item.get("url"):
+                        return item["url"]
+                return None
+
+            # 下载音频：每种音质只试1次，连接超时5秒，双音质备用，总时间≤10秒
+            for try_quality in [quality, "higher"]:
                 try:
-                    resp = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            _download_session.get, play_url,
-                            timeout=(15, 30),
-                            headers={"Referer": "https://music.163.com/"}
-                        ),
-                        timeout=45
+                    play_url = await asyncio.wait_for(
+                        asyncio.to_thread(_get_url, try_quality), timeout=3
                     )
-                    if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
-                        audio_content = resp.content
-                        _retry_info = f" (第{_retry+1}次尝试)" if _retry > 0 else ""
-                        logger.info(f"代理端点 song_id={sid} 音质={try_quality} 下载成功{_retry_info} 大小={len(audio_content)}bytes")
-                        break
-                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
                 except asyncio.TimeoutError:
-                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载超时 (第{_retry+1}次尝试)")
-                    if _retry == 0:
-                        await asyncio.sleep(1)
-                        continue
-                except Exception as e:
-                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 异常: {type(e).__name__}: {e}")
-                    if _retry == 0:
-                        await asyncio.sleep(1)
-                        continue
-                break  # 非超时异常或成功，跳出重试循环
-            if audio_content:
-                break
+                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 获取地址超时")
+                    continue
+                if not play_url:
+                    continue
+                if play_url.startswith("http://"):
+                    play_url = "https://" + play_url[7:]
+                # 每种音质重试1次，连接超时15秒，读取超时30秒，总超时45秒
+                for _retry in range(2):
+                    try:
+                        resp = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                _download_session.get, play_url,
+                                timeout=(15, 30),
+                                headers={"Referer": "https://music.163.com/"}
+                            ),
+                            timeout=45
+                        )
+                        if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
+                            audio_content = resp.content
+                            _proxy_used = "直接下载"
+                            _retry_info = f" (第{_retry+1}次尝试)" if _retry > 0 else ""
+                            logger.info(f"代理端点 song_id={sid} 音质={try_quality} 直接下载成功{_retry_info} 大小={len(audio_content)}bytes")
+                            break
+                        logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载超时 (第{_retry+1}次尝试)")
+                        if _retry == 0:
+                            await asyncio.sleep(1)
+                            continue
+                    except Exception as e:
+                        logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 异常: {type(e).__name__}: {e}")
+                        if _retry == 0:
+                            await asyncio.sleep(1)
+                            continue
+                    break  # 非超时异常或成功，跳出重试循环
+                if audio_content:
+                    break
 
         if not audio_content:
             return web.Response(status=502, text="Audio download failed")
@@ -2221,31 +2268,18 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             )
         else:
-            # 未缓存：采用与正常播放一致的三级代理优先级：CF反向代理 → Vercel → Render
+            # 未缓存：内联搜索全部使用 Render 代理（Bot 自己的 /audio/{song_id} 端点）
+            # Render 代理内部实现三级回退：CF → Vercel → 直接下载
             cover_param = ""
             _cover = song.get("cover") or song.get("picUrl") or song.get("album_pic") or (song.get("al") or {}).get("picUrl")
             if _cover:
                 cover_param = f"&cover={quote(_cover, safe='')}"
             
-            # 构建代理列表（优先级：CF反向代理 → Vercel → Render）
-            _proxy_candidates = []
-            if config.CF_PROXY_URL:
-                _proxy_candidates.append((config.CF_PROXY_URL, "CF反向代理"))
-            if config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
-                _proxy_candidates.append((config.AUDIO_PROXY_URL, "Vercel"))
-            # Render 本地代理作为最后回退
-            if config.WEBHOOK_URL:
-                _proxy_candidates.append((config.WEBHOOK_URL.rstrip('/'), "Render"))
-            
-            # 选择第一个可用的代理（内联搜索无法动态回退，选择优先级最高的）
-            if _proxy_candidates:
-                _proxy_base, _proxy_type = _proxy_candidates[0]
-            else:
-                _proxy_base = config.WEBHOOK_URL.rstrip('/') if config.WEBHOOK_URL else ""
-                _proxy_type = "Render"
-            
+            # 全部使用 Render 代理
+            _proxy_base = config.WEBHOOK_URL.rstrip('/') if config.WEBHOOK_URL else ""
+            _proxy_type = "Render"
             proxy_url = f"{_proxy_base}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
-            logger.info(f"内联结果 代理歌曲 {song['name']} 代理类型={_proxy_type} (候选数={len(_proxy_candidates)}) proxy_url长度={len(proxy_url)}")
+            logger.info(f"内联结果 代理歌曲 {song['name']} 代理类型={_proxy_type} (全部使用Render代理) proxy_url长度={len(proxy_url)}")
             results.append(
                 InlineQueryResultAudio(
                     id=f"url_{song['id']}",
