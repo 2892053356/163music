@@ -154,7 +154,25 @@ def _log_status(message: str, style: str = "info"):
 # ============================================================
 # 全局实例
 # ============================================================
-api = NeteaseAPI(cookie=config.NETEASE_COOKIE)
+
+# 先从 Database 加载配置（优先于环境变量，减少 Render 环境变量配置）
+# 需要的配置：bot:token, bot:admin_id, bot:cf_proxy_url, bot:cookie
+_db_token = db.get_bot_token()
+_db_admin_id = db.get_admin_id()
+_db_cf_proxy = db.get_cf_proxy_url()
+_db_cookie = db.get_cookie()
+
+# 覆盖 config 中的值（Database 优先，环境变量作为兜底）
+if _db_token:
+    config.BOT_TOKEN = _db_token
+if _db_admin_id:
+    config.ADMIN_ID = _db_admin_id
+if _db_cf_proxy:
+    config.CF_PROXY_URL = _db_cf_proxy
+
+# 使用 Database 中的 cookie 初始化 api（优先），环境变量作为兜底
+_init_cookie = _db_cookie if _db_cookie else config.NETEASE_COOKIE
+api = NeteaseAPI(cookie=_init_cookie)
 
 # 用户活动时间戳（用于缓存任务优先级控制：有用户请求时暂停缓存）
 last_user_activity = 0
@@ -3583,17 +3601,18 @@ def main():
     # 错误
     application.add_error_handler(error_handler)
 
-    # 从 Redis 加载 cookie（优先于环境变量，支持运行时更新）
-    saved_cookie = db.get_cookie()
-    if saved_cookie:
-        api.update_cookie(saved_cookie)
-        cookie_source = "数据库"
-    else:
-        cookie_source = "环境变量"
+    # 配置来源信息（初始化时已从 Database 加载）
+    token_source = "数据库" if _db_token else "环境变量"
+    admin_source = "数据库" if _db_admin_id else "环境变量"
+    cf_source = "数据库" if _db_cf_proxy else "环境变量/默认"
+    cookie_source = "数据库" if _db_cookie else "环境变量"
+
     print(f"🍪 Cookie 来源: {cookie_source} (长度: {len(api.get_cookie())})")
+    print(f"🤖 Bot Token 来源: {token_source} (长度: {len(config.BOT_TOKEN)})")
+    print(f"👑 管理员 ID 来源: {admin_source} ({config.ADMIN_ID})")
+    print(f"🌐 CF代理 来源: {cf_source} ({config.CF_PROXY_URL if config.CF_PROXY_URL else '未配置'})")
 
     print("✅ Bot 已启动")
-    print(f"👑 管理员 ID: {config.ADMIN_ID}")
     print(f"🎵 音质等级: {db.get_quality()}")
     print(f"💾 数据库: {getattr(config, 'DB_TYPE', 'sqlite')} ({'已连接' if db.enabled else '未连接'})")
     print("=" * 50)
