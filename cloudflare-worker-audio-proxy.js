@@ -87,7 +87,23 @@ async function aesEncrypt(text, key, iv) {
 }
 
 /**
- * RSA 加密（使用 BigInt）
+ * 模幂运算（快速幂）- 避免 base^exp 产生巨大数
+ */
+function modPow(base, exp, mod) {
+  let result = 1n;
+  base = base % mod;
+  while (exp > 0n) {
+    if (exp % 2n === 1n) {
+      result = (result * base) % mod;
+    }
+    exp = exp / 2n;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+
+/**
+ * RSA 加密（使用 BigInt 模幂运算）
  */
 function rsaEncrypt(text, pubKey, modulus) {
   // 反转文本
@@ -97,11 +113,11 @@ function rsaEncrypt(text, pubKey, modulus) {
   for (let i = 0; i < textReversed.length; i++) {
     hex += textReversed.charCodeAt(i).toString(16).padStart(2, '0');
   }
-  // BigInt 加密
+  // BigInt 模幂加密（使用快速幂，避免巨大数）
   const base = BigInt('0x' + hex);
   const exp = BigInt('0x' + pubKey);
   const mod = BigInt('0x' + modulus);
-  const result = (base ** exp) % mod;
+  const result = modPow(base, exp, mod);
   // 转换为十六进制字符串，补零到256位
   return result.toString(16).padStart(256, '0');
 }
@@ -222,6 +238,17 @@ async function debugInfo(env) {
       info.cookie_from_upstash = cookie ? `已获取 (${cookie.length} 字符)` : '未找到';
       info.cookie_preview = cookie ? cookie.substring(0, 50) + '...' : null;
       info.cookie_format_correct = cookie ? cookie.startsWith('MUSIC_U=') : false;
+      
+      // 测试 weapi 加密
+      try {
+        const testEncrypted = await weapiEncrypt({ ids: '[1]', level: 'standard', encodeType: 'mp3' });
+        info.weapi_encrypt_test = '成功';
+        info.weapi_params_length = testEncrypted.params.length;
+        info.weapi_encseckey_length = testEncrypted.encSecKey.length;
+      } catch (e) {
+        info.weapi_encrypt_test = '失败';
+        info.weapi_encrypt_error = e.message;
+      }
     } catch (e) {
       info.upstash_error = e.message;
     }
