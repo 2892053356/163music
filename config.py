@@ -30,16 +30,16 @@ PROXY_URL = os.environ.get("PROXY_URL", "")
 # 留空则使用Render本地代理（消耗出站流量）
 CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "https://cf-music-proxy.l2892053356.workers.dev")
 
-# 音频代理URL（普通搜索/播放/歌单缓存使用，推荐CF反向代理→Netlify）
-# CF反向代理：Telegram通过CF访问，CF转发给Netlify下载网易云音频
+# 音频代理URL（普通搜索/播放/歌单缓存使用，推荐Vercel）
+# Vercel代理：从Upstash获取Cookie，代理网易云音频流
 # 留空则使用 WEBHOOK_URL 作为代理
-# 格式: https://your-worker.workers.dev （不要末尾斜杠）
-AUDIO_PROXY_URL = os.environ.get("AUDIO_PROXY_URL", "https://cf-music-proxy.l2892053356.workers.dev")
+# 格式: https://your-project.vercel.app/api/music （不要末尾斜杠）
+AUDIO_PROXY_URL = os.environ.get("AUDIO_PROXY_URL", "https://163music-vercel-proxy.vercel.app/api/music")
 
-# 内联搜索专用代理URL（内联搜索使用，推荐Netlify，速度快无CPU限制）
+# 内联搜索专用代理URL（内联搜索使用，推荐Vercel）
 # 留空则回退使用 AUDIO_PROXY_URL
-# 格式: https://your-site.netlify.app （不要末尾斜杠）
-INLINE_PROXY_URL = os.environ.get("INLINE_PROXY_URL", "https://mellifluous-pothos-dafce2.netlify.app")
+# 格式: https://your-project.vercel.app/api/music （不要末尾斜杠）
+INLINE_PROXY_URL = os.environ.get("INLINE_PROXY_URL", "https://163music-vercel-proxy.vercel.app/api/music")
 
 # Webhook 模式配置
 # Render 会自动设置 RENDER_EXTERNAL_URL 和 PORT
