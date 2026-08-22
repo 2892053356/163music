@@ -170,31 +170,6 @@ class UpstashDB:
             return True
         return False
 
-    # ---- 歌单暂停功能 ----
-    def set_playlist_pause(self, user_id: int):
-        """设置用户歌单暂停标志"""
-        self._exec("SET", f"playlist:pause:{user_id}", "1", "EX", 3600)  # 1小时过期
-
-    def clear_playlist_pause(self, user_id: int):
-        """清除用户歌单暂停标志"""
-        self._exec("DEL", f"playlist:pause:{user_id}")
-
-    def check_playlist_paused(self, user_id: int) -> bool:
-        """检查用户歌单是否暂停（不清除标志）"""
-        return bool(self._exec("EXISTS", f"playlist:pause:{user_id}"))
-
-    def set_all_playlist_pause(self):
-        """管理员：设置所有用户歌单暂停标志"""
-        self._exec("SET", "playlist:pause:all", "1", "EX", 3600)
-
-    def clear_all_playlist_pause(self):
-        """管理员：清除所有用户歌单暂停标志"""
-        self._exec("DEL", "playlist:pause:all")
-
-    def check_all_playlist_paused(self) -> bool:
-        """检查是否有全局暂停标志（不清除）"""
-        return bool(self._exec("EXISTS", "playlist:pause:all"))
-
     # ---- Telegram file_id 缓存（避免重复上传音频） ----
     def get_file_id(self, song_id: int) -> str:
         result = self._exec("GET", f"cache:file_id:{song_id}")
