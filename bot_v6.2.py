@@ -1539,7 +1539,36 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退代理: {e}")
 
-    # 缓存未命中：优先使用外部代理URL发送（带重试），失败时回退到Render下载+上传
+    # 缓存未命中：测试方案A - 优先尝试直接发送网易云直链（Telegram自行下载，零Render流量）
+    # 如果成功，说明Telegram能直接访问网易云CDN，这是最优方案
+    # 如果失败，回退到代理URL，再失败回退到Render下载
+    if url:
+        try:
+            logger.info(f"播放歌曲 🧪 测试直接发送网易云直链: {song['name']} - {song['artist']} (用户={user_label}) -> {url[:80]}...")
+            msg = await context.bot.send_audio(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                audio=url,
+                filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
+                title=song["name"],
+                performer=song["artist"],
+                caption=caption,
+                parse_mode="HTML",
+                thumbnail=song["cover"] if song["cover"] else None,
+                duration=song["duration"] // 1000 if song["duration"] else None,
+                reply_markup=reply_markup,
+            )
+            if edit:
+                await update.callback_query.delete_message()
+            if msg and msg.audio and msg.audio.file_id:
+                await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+            logger.info(f"播放歌曲 ✅ 直接发送网易云直链成功: {song['name']} - {song['artist']} (零Render流量)")
+            active_search_plays.discard(user.id)
+            return
+        except Exception as e:
+            logger.warning(f"播放歌曲 ❌ 直接发送网易云直链失败，回退代理: {song['name']} - {e}")
+    
+    # 方案A失败：使用外部代理URL发送（带重试），失败时回退到Render下载+上传
     if config.AUDIO_PROXY_URL:
         _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}"
         proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
