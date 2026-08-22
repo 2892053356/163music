@@ -1680,17 +1680,36 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退代理: {e}")
 
-    # 缓存未命中：测试方案A - 优先尝试直接发送网易云直链（Telegram自行下载，零Render流量）
-    # 如果成功，说明Telegram能直接访问网易云CDN，这是最优方案
-    # 如果失败，回退到代理URL，再失败回退到Render下载
+    # 4级回退：CF代理 → 网易云直链 → Vercel代理 → Render下载
+    # 每一步发送成功后检查音频文件名是否正确，不正确则删除消息继续下一个回退
+    from urllib.parse import quote
+    
+    # 构建回退列表（按用户要求的顺序）
+    fallback_list = []
+    
+    # 1. CF 代理（优先）
+    if config.CF_PROXY_URL:
+        cf_url = f"{config.CF_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}"
+        fallback_list.append(("CF代理", cf_url))
+    
+    # 2. 网易云直链（Telegram自行下载，零Render流量）
     if url:
+        fallback_list.append(("网易云直链", url))
+    
+    # 3. Vercel 代理
+    if config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
+        vercel_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}"
+        fallback_list.append(("Vercel代理", vercel_url))
+    
+    # 尝试每个回退
+    for proxy_type, proxy_url in fallback_list:
         try:
-            logger.info(f"播放歌曲 🧪 测试直接发送网易云直链: {song['name']} - {song['artist']} (用户={user_label}) -> {url[:80]}...")
+            logger.info(f"播放歌曲 🌐 使用{proxy_type}: {song['name']} - {song['artist']} (用户={user_label}) -> {proxy_url[:80]}...")
             msg = await context.bot.send_audio(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
-                audio=url,
-                filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
+                audio=proxy_url,
+                filename=f"{song['name']}.mp3",
                 title=song["name"],
                 performer=song["artist"],
                 caption=caption,
@@ -1699,60 +1718,37 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 duration=song["duration"] // 1000 if song["duration"] else None,
                 reply_markup=reply_markup,
             )
+            
+            # 检查音频文件名称是否正确（修复数字ID文件名问题）
+            actual_filename = (msg.audio.file_name or "") if msg and msg.audio else ""
+            actual_title = (msg.audio.title or "") if msg and msg.audio else ""
+            # 文件名正确的条件：不为空、不以song_数字ID开头、标题与歌曲名匹配
+            filename_ok = bool(actual_filename) and not actual_filename.startswith(f"song_{song_id}")
+            title_ok = bool(actual_title) and not actual_title.isdigit() and actual_title != str(song_id) and actual_title == song["name"]
+            
+            if not filename_ok or not title_ok:
+                logger.warning(f"播放歌曲 ⚠️ {proxy_type}文件名/标题不正确: 文件名='{actual_filename}' 标题='{actual_title}'，删除消息继续下一个回退")
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                except Exception as del_e:
+                    logger.warning(f"删除文件名不正确的消息失败: {del_e}")
+                continue
+            
+            # 文件名和标题都正确，保存 file_id 并返回
             if edit:
                 await update.callback_query.delete_message()
             if msg and msg.audio and msg.audio.file_id:
                 await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
             # 记录发送时间戳（5秒去重）
             playlist_sent_songs[user.id][song_id] = time.time()
-            logger.info(f"播放歌曲 ✅ 直接发送网易云直链成功: {song['name']} - {song['artist']} (零Render流量)")
+            logger.info(f"播放歌曲 ✅ {proxy_type}成功: {song['name']} - {song['artist']} (文件名='{actual_filename}' 标题='{actual_title}')")
             active_search_plays.discard(user.id)
             return
         except Exception as e:
-            logger.warning(f"播放歌曲 ❌ 直接发送网易云直链失败，回退代理: {song['name']} - {e}")
+            logger.warning(f"播放歌曲 ❌ {proxy_type}失败: {song['name']} - {e}")
+            continue
     
-    # 方案A失败：使用外部代理URL发送（带重试），失败时回退到Render下载+上传
-    if config.AUDIO_PROXY_URL:
-        from urllib.parse import quote
-        _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}"
-        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-        
-        # 带重试的代理发送（最多2次）
-        for attempt in range(2):
-            try:
-                if attempt > 0:
-                    logger.info(f"播放歌曲 🔄 代理重试{attempt}/{1}: {song['name']} - {song['artist']}")
-                    await asyncio.sleep(1)
-                logger.info(f"播放歌曲 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']} (用户={user_label}) -> {_proxy_url[:80]}...")
-                msg = await context.bot.send_audio(
-                    chat_id=chat_id,
-                    message_thread_id=message_thread_id,
-                    audio=_proxy_url,
-                    filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
-                    title=song["name"],
-                    performer=song["artist"],
-                    caption=caption,
-                    parse_mode="HTML",
-                    thumbnail=song["cover"] if song["cover"] else None,
-                    duration=song["duration"] // 1000 if song["duration"] else None,
-                    reply_markup=reply_markup,
-                )
-                if edit:
-                    await update.callback_query.delete_message()
-                # 发送成功后保存 file_id 到缓存
-                if msg and msg.audio and msg.audio.file_id:
-                    await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
-                # 记录发送时间戳（5秒去重）
-                playlist_sent_songs[user.id][song_id] = time.time()
-                active_search_plays.discard(user.id)
-                return
-            except Exception as e:
-                if attempt == 0:
-                    logger.warning(f"代理URL第{attempt+1}次发送失败，准备重试: {e}")
-                else:
-                    logger.warning(f"代理URL发送失败（已重试），回退Render下载: {e}")
-    
-    # 代理失败或未配置代理URL，回退到Render下载+上传（使用优化的下载模块）
+    # 4. 所有回退失败，使用 Render 下载+上传（使用优化的下载模块）
     logger.info(f"播放歌曲 🖥️ 使用Render下载（优化版）: {song['name']} - {song['artist']} (用户={user_label})")
     if not url:
         err_msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
@@ -1787,7 +1783,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             chat_id=chat_id,
             message_thread_id=message_thread_id,
             audio=audio_bytes,
-            filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
+            filename=f"{song['name']}.mp3",
             title=song["name"],
             performer=song["artist"],
             caption=caption,
