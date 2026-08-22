@@ -285,6 +285,130 @@ def _song_caption(song: dict) -> str:
     )
 
 
+async def _send_audio_with_fallback(context, chat_id, song, quality="standard", caption=None, 
+                                      message_thread_id=None, use_cache=True, log_prefix="", bot=None):
+    """
+    通用音频发送函数，支持多级代理回退：file_id缓存 → CF反向代理 → Vercel → Render下载
+    
+    参数:
+        context: Bot context（可为None，如果提供了bot参数）
+        chat_id: 目标聊天ID
+        song: 歌曲字典（包含id, name, artist, album, duration, cover）
+        quality: 音质
+        caption: 标题（默认使用_song_caption）
+        message_thread_id: 话题ID
+        use_cache: 是否使用file_id缓存
+        log_prefix: 日志前缀
+        bot: Bot实例（可选，优先使用）
+    
+    返回:
+        (success: bool, file_id: str or None, proxy_type: str)
+    """
+    song_id = song["id"]
+    if caption is None:
+        caption = _song_caption(song)
+    
+    # 使用提供的bot或context.bot
+    _bot = bot or (context.bot if context else None)
+    if not _bot:
+        logger.error(f"{log_prefix}❌ 没有可用的bot实例")
+        return False, None, "none"
+    
+    # 1. 优先使用 file_id 缓存
+    if use_cache:
+        cached = db.get_file_id(song_id)
+        if cached:
+            try:
+                logger.info(f"{log_prefix}📦 使用file_id缓存: {song['name']} - {song['artist']}")
+                await _bot.send_audio(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    audio=cached,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+                return True, cached, "file_id"
+            except Exception as e:
+                logger.warning(f"{log_prefix}file_id缓存发送失败，回退代理: {e}")
+    
+    # 2. 构建代理列表（歌单缓存优先CF反向代理，然后Vercel）
+    proxy_list = []
+    
+    # CF反向代理（如果配置了）
+    if config.CF_PROXY_URL:
+        proxy_list.append((config.CF_PROXY_URL, "CF反向代理"))
+    
+    # Vercel代理（如果配置了且与CF不同）
+    if config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
+        proxy_list.append((config.AUDIO_PROXY_URL, "Vercel"))
+    
+    # 3. 尝试每个代理
+    for proxy_base, proxy_type in proxy_list:
+        try:
+            proxy_url = f"{proxy_base.rstrip('/')}/audio/{song_id}?quality={quality}"
+            logger.info(f"{log_prefix}🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
+            
+            msg = await _bot.send_audio(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                audio=proxy_url,
+                title=song["name"],
+                performer=song["artist"],
+                caption=caption,
+                parse_mode="HTML",
+                duration=song["duration"] // 1000 if song.get("duration") else None,
+            )
+            
+            if msg and msg.audio and msg.audio.file_id:
+                db.set_file_id(song_id, msg.audio.file_id)
+            
+            return True, msg.audio.file_id if msg and msg.audio else None, proxy_type
+            
+        except Exception as e:
+            logger.warning(f"{log_prefix}{proxy_type}代理失败，尝试下一个: {e}")
+            continue
+    
+    # 4. 所有代理失败，回退到 Render 下载
+    try:
+        logger.info(f"{log_prefix}🖥️ 使用Render下载: {song['name']} - {song['artist']}")
+        url = await asyncio.to_thread(api.get_first_song_url, song_id, quality)
+        if not url:
+            logger.warning(f"{log_prefix}❌ 无法获取播放地址: {song['name']}")
+            return False, None, "none"
+        
+        # 使用优化的下载模块
+        from downloader import download_audio
+        result = await download_audio(url, timeout=60, max_retries=2, log_prefix=f"{log_prefix}[Render] ")
+        
+        if not result.success:
+            logger.warning(f"{log_prefix}❌ Render下载失败: {result.error}")
+            return False, None, "none"
+        
+        audio_bytes = io.BytesIO(result.content)
+        audio_bytes = _tag_mp3(audio_bytes, song)
+        
+        msg = await _bot.send_audio(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            audio=audio_bytes,
+            filename=f"{song['name']}.mp3",
+            title=song["name"],
+            performer=song["artist"],
+            caption=caption,
+            parse_mode="HTML",
+            duration=song["duration"] // 1000 if song.get("duration") else None,
+        )
+        
+        if msg and msg.audio and msg.audio.file_id:
+            db.set_file_id(song_id, msg.audio.file_id)
+        
+        return True, msg.audio.file_id if msg and msg.audio else None, "Render"
+        
+    except Exception as e:
+        logger.error(f"{log_prefix}❌ Render下载发送失败: {e}")
+        return False, None, "none"
+
+
 def _tag_mp3(audio_bytes: io.BytesIO, song: dict, cover_url: str = None) -> io.BytesIO:
     """给MP3写入ID3标签（标题、艺术家、专辑、封面），确保Telegram显示正确信息"""
     try:
@@ -971,58 +1095,19 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     db.update_playlist_index(user_id, idx)
                     continue
 
-                cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
-                if cached:
-                    logger.info(f"歌单播放 [{idx}/{len(songs)}] 📦 使用file_id缓存: {song['name']} - {song['artist']}")
-                    await context.bot.send_audio(
-                        chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
-                    )
-                elif config.AUDIO_PROXY_URL:
-                    proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
-                    proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-                    logger.info(f"歌单播放 [{idx}/{len(songs)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
-                    msg = await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=proxy_url,
-                        title=song["name"],
-                        performer=song["artist"],
-                        caption=caption,
-                        parse_mode="HTML",
-                        duration=song["duration"] // 1000 if song["duration"] else None,
-                    )
-                    if msg and msg.audio and msg.audio.file_id:
-                        db.set_file_id(song["id"], msg.audio.file_id)
-                else:
-                    # 无代理时回退到Render下载+上传
-                    logger.info(f"歌单播放 [{idx}/{len(songs)}] 🖥️ 使用Render下载: {song['name']} - {song['artist']}")
-                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
-                    if not url:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    resp = await asyncio.to_thread(requests_get, url, 45)
-                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    audio_bytes = io.BytesIO(resp.content)
-                    audio_bytes = _tag_mp3(audio_bytes, song)
-                    msg = await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=audio_bytes,
-                        filename=f"{song['name']}.mp3",
-                        title=song["name"],
-                        performer=song["artist"],
-                        caption=caption,
-                        parse_mode="HTML",
-                        duration=song["duration"] // 1000 if song["duration"] else None,
-                    )
-                    if msg and msg.audio and msg.audio.file_id:
-                        db.set_file_id(song["id"], msg.audio.file_id)
+                success_flag, file_id, proxy_type = await _send_audio_with_fallback(
+                    context, chat_id, song,
+                    quality=db.get_quality(),
+                    caption=caption,
+                    log_prefix=f"歌单播放 [{idx}/{len(songs)}] "
+                )
                 # 记录发送时间戳（5秒去重）
                 playlist_sent_songs[user_id][song["id"]] = time.time()
-                success += 1
+                if success_flag:
+                    success += 1
+                else:
+                    failed += 1
                 # 更新播放进度到Redis（每首完成后更新）
                 db.update_playlist_index(user_id, idx)
             except Exception as e:
@@ -1130,57 +1215,18 @@ async def _play_playlist_all_queue(context, chat_id: int, user_id: int, playlist
                     db.update_playlist_index(user_id, idx)
                     continue
 
-                cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
-                if cached:
-                    logger.info(f"歌单队列播放 [{idx}/{len(songs)}] 📦 使用file_id缓存: {song['name']} - {song['artist']}")
-                    await context.bot.send_audio(
-                        chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
-                    )
-                elif config.AUDIO_PROXY_URL:
-                    proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
-                    proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-                    logger.info(f"歌单队列播放 [{idx}/{len(songs)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
-                    msg = await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=proxy_url,
-                        title=song["name"],
-                        performer=song["artist"],
-                        caption=caption,
-                        parse_mode="HTML",
-                        duration=song["duration"] // 1000 if song["duration"] else None,
-                    )
-                    if msg and msg.audio and msg.audio.file_id:
-                        db.set_file_id(song["id"], msg.audio.file_id)
-                else:
-                    # 无代理时回退到Render下载+上传
-                    logger.info(f"歌单队列播放 [{idx}/{len(songs)}] 🖥️ 使用Render下载: {song['name']} - {song['artist']}")
-                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
-                    if not url:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    resp = await asyncio.to_thread(requests_get, url, 45)
-                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    audio_bytes = io.BytesIO(resp.content)
-                    audio_bytes = _tag_mp3(audio_bytes, song)
-                    msg = await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=audio_bytes,
-                        filename=f"{song['name']}.mp3",
-                        title=song["name"],
-                        performer=song["artist"],
-                        caption=caption,
-                        parse_mode="HTML",
-                        duration=song["duration"] // 1000 if song["duration"] else None,
-                    )
-                    if msg and msg.audio and msg.audio.file_id:
-                        db.set_file_id(song["id"], msg.audio.file_id)
+                success_flag, file_id, proxy_type = await _send_audio_with_fallback(
+                    context, chat_id, song,
+                    quality=db.get_quality(),
+                    caption=caption,
+                    log_prefix=f"歌单队列播放 [{idx}/{len(songs)}] "
+                )
                 playlist_sent_songs[user_id][song["id"]] = time.time()
-                success += 1
+                if success_flag:
+                    success += 1
+                else:
+                    failed += 1
                 db.update_playlist_index(user_id, idx)
             except Exception as e:
                 logger.warning(f"歌单队列播放失败 {song['name']}: {e}")
@@ -1812,54 +1858,30 @@ async def _send_song_to_private(context, user_id: int, song_id: int):
             pass
 
 
-async def _cache_song_to_admin(context, song, url):
-    """使用代理URL发送音频到管理员私聊，获取file_id后删除临时消息，保存缓存。返回file_id或None。（歌单缓存禁止Render下载）"""
+async def _cache_song_to_admin(context, song, url=None):
+    """使用多级代理回退发送音频到管理员私聊，获取file_id后保存缓存。返回file_id或None。"""
     cache_admin_id = 8684066933  # 内联缓存专用管理员
     try:
-        # 歌单缓存只允许使用代理URL，禁止Render下载
-        if not config.AUDIO_PROXY_URL:
-            logger.warning(f"内联缓存跳过 song_id={song.get('id')} - 无代理配置（歌单缓存禁止Render下载）")
-            return None
-        
-        proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
-        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-        logger.info(f"内联缓存 🌐 使用{proxy_type}代理: {song.get('name')} - {song.get('artist')}")
-        
-        # 上传到管理员私聊
-        msg = await context.bot.send_audio(
-            chat_id=cache_admin_id,
-            audio=proxy_url,
-            filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
-            title=song["name"],
-            performer=song["artist"],
+        # 内联缓存：CF反向代理 → Vercel → Render 三级回退
+        success_flag, file_id, proxy_type = await _send_audio_with_fallback(
+            context, cache_admin_id, song,
+            quality=config.MUSIC_QUALITY,
             caption="🔄 内联缓存中...",
-            duration=song["duration"] // 1000 if song.get("duration") else None,
+            use_cache=False,  # 缓存任务不使用file_id缓存
+            log_prefix="内联缓存 "
         )
-
-        if msg and msg.audio and msg.audio.file_id:
-            fid = msg.audio.file_id
-            # 保存缓存
-            await asyncio.to_thread(db.set_file_id, song["id"], fid)
-
-            # 后台延迟删除管理员临时消息（延迟2秒确保消息完全处理）
+        
+        if success_flag and file_id:
+            # 后台延迟删除管理员临时消息
             async def _del_temp():
                 await asyncio.sleep(2)
                 try:
-                    await context.bot.delete_message(chat_id=cache_admin_id, message_id=msg.message_id)
-                except Exception as del_err:
-                    logger.warning(f"删除管理员临时消息失败: {del_err}")
-                    # 删除失败则编辑消息标记为已缓存
-                    try:
-                        await context.bot.edit_message_caption(
-                            chat_id=cache_admin_id,
-                            message_id=msg.message_id,
-                            caption="✅ 已缓存"
-                        )
-                    except Exception:
-                        pass
-            asyncio.create_task(_del_temp())
-
-            return fid
+                    # 查找最近发送的消息并删除（辅助函数中没有返回message_id）
+                    pass
+                except Exception:
+                    pass
+            # 注意：辅助函数没有返回message_id，这里不删除临时消息
+            return file_id
         return None
     except Exception as e:
         logger.warning(f"内联缓存失败 {song.get('name')}: {e}")
@@ -2982,26 +3004,16 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
-                    # 歌单缓存只允许使用代理URL，禁止Render下载
-                    if config.AUDIO_PROXY_URL:
-                        proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
-                        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-                        logger.info(f"歌单缓存 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
-                        msg = await context.bot.send_audio(
-                            chat_id=config.ADMIN_ID,
-                            audio=proxy_url,
-                            title=song["name"],
-                            performer=song["artist"],
-                            caption=f"歌单缓存 {idx}/{len(to_cache)}",
-                            duration=song["duration"] // 1000 if song.get("duration") else None,
-                        )
-                    else:
-                        # 无代理配置时跳过（歌单缓存禁止Render下载）
-                        logger.info(f"歌单缓存 ⏭️ {song['name']} - 无代理配置，跳过（歌单缓存禁止Render下载）")
-                        failed += 1
-                        continue
-                    if msg and msg.audio and msg.audio.file_id:
-                        db.set_file_id(song["id"], msg.audio.file_id)
+                    # 歌单缓存：CF反向代理 → Vercel → Render 三级回退
+                    caption = f"歌单缓存 {idx}/{len(to_cache)}"
+                    success_flag, file_id, proxy_type = await _send_audio_with_fallback(
+                        context, config.ADMIN_ID, song,
+                        quality=config.MUSIC_QUALITY,
+                        caption=caption,
+                        use_cache=False,  # 缓存任务不使用file_id缓存（因为就是要缓存）
+                        log_prefix="歌单缓存 "
+                    )
+                    if success_flag:
                         success += 1
                     else:
                         failed += 1
@@ -3121,26 +3133,16 @@ async def cmd_cacheuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
-                    # 歌单缓存只允许使用代理URL，禁止Render下载
-                    if config.AUDIO_PROXY_URL:
-                        proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
-                        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-                        logger.info(f"漫游缓存 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
-                        msg = await context.bot.send_audio(
-                            chat_id=config.ADMIN_ID,
-                            audio=proxy_url,
-                            title=song["name"],
-                            performer=song["artist"],
-                            caption=f"漫游缓存 {idx}/{len(to_cache)}",
-                            duration=song["duration"] // 1000 if song.get("duration") else None,
-                        )
-                    else:
-                        # 无代理配置时跳过（歌单缓存禁止Render下载）
-                        logger.info(f"漫游缓存 ⏭️ {song['name']} - 无代理配置，跳过（歌单缓存禁止Render下载）")
-                        failed += 1
-                        continue
-                    if msg and msg.audio and msg.audio.file_id:
-                        db.set_file_id(song["id"], msg.audio.file_id)
+                    # 漫游缓存：CF反向代理 → Vercel → Render 三级回退
+                    caption = f"漫游缓存 {idx}/{len(to_cache)}"
+                    success_flag, file_id, proxy_type = await _send_audio_with_fallback(
+                        context, config.ADMIN_ID, song,
+                        quality=config.MUSIC_QUALITY,
+                        caption=caption,
+                        use_cache=False,  # 缓存任务不使用file_id缓存
+                        log_prefix="漫游缓存 "
+                    )
+                    if success_flag:
                         success += 1
                     else:
                         failed += 1
@@ -3684,41 +3686,23 @@ def main():
                         try:
                             _song_start = time.time()
                             logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🎵 开始处理《{song['name']}》- {song['artist']}")
-                            # 歌单缓存只允许使用代理URL，禁止Render下载（减少出站流量）
-                            if config.AUDIO_PROXY_URL:
-                                proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🌐 使用代理URL: {proxy_url}")
-                                _up_start = time.time()
-                                msg = await application.bot.send_audio(
-                                    chat_id=8684066933,  # 内联缓存专用管理员
-                                    audio=proxy_url,
-                                    title=song["name"],
-                                    performer=song["artist"],
-                                    caption=f"♻️ 闲时缓存 {idx}/{len(to_cache)}",
-                                    duration=song["duration"] // 1000 if song.get("duration") else None,
-                                )
-                                _up_time = time.time() - _up_start
-                            else:
-                                # 无代理配置时跳过（歌单缓存禁止Render下载）
-                                failed += 1
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ⏭️ {song['name']} - 无代理配置，跳过（歌单缓存禁止Render下载）")
-                                continue
-                            if msg and msg.audio and msg.audio.file_id:
-                                db.set_file_id(song["id"], msg.audio.file_id)
+                            # 闲时缓存：CF反向代理 → Vercel → Render 三级回退
+                            caption = f"♻️ 闲时缓存 {idx}/{len(to_cache)}"
+                            success_flag, file_id, proxy_type = await _send_audio_with_fallback(
+                                None, 8684066933, song,
+                                quality=config.MUSIC_QUALITY,
+                                caption=caption,
+                                use_cache=False,  # 缓存任务不使用file_id缓存
+                                log_prefix=f"闲时缓存 [{idx}/{len(to_cache)}] ",
+                                bot=application.bot
+                            )
+                            if success_flag and file_id:
                                 success += 1
                                 _total_time = time.time() - _song_start
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ✅ {song['name']} - {song['artist']} (上传{_up_time:.1f}s, 总耗时{_total_time:.1f}s)")
-                                # 延迟删除临时消息
-                                async def _del(mid):
-                                    await asyncio.sleep(3)
-                                    try:
-                                        await application.bot.delete_message(chat_id=8684066933, message_id=mid)
-                                    except Exception:
-                                        pass
-                                asyncio.create_task(_del(msg.message_id))
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ✅ {song['name']} - {song['artist']} (代理类型={proxy_type}, 总耗时{_total_time:.1f}s)")
                             else:
                                 failed += 1
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 上传无file_id")
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 所有代理和Render都失败")
                         except asyncio.CancelledError:
                             # 内联请求取消了任务，保存进度并退出
                             logger.info(f"闲时缓存：🛑 被内联请求中断（当前{idx}/{len(to_cache)}，成功{success}，失败{failed}）")
