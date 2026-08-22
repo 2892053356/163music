@@ -3357,7 +3357,7 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 当前没有用户正在播放歌单。")
         return
 
-    # 显示正在播放歌单的用户列表，带停止按钮
+    # 显示正在播放歌单的用户列表，带暂停/恢复/停止按钮
     keyboard = []
     info_lines = []
     for uid in active_users:
@@ -3367,6 +3367,9 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         playlist_id = data.get("playlist_id", "?")
         current = data.get("current_index", 0)
         total = data.get("total", 0)
+        # 检查是否已暂停
+        is_paused = db.check_playlist_paused(uid)
+        pause_status = " ⏸️已暂停" if is_paused else " ▶️播放中"
         # 获取用户名
         try:
             user_info = await context.bot.get_chat(uid)
@@ -3375,10 +3378,16 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name += f" (@{user_info.username})"
         except Exception:
             name = str(uid)
-        info_lines.append(f"• {name}\n  歌单ID: {playlist_id}，进度: {current}/{total}")
-        keyboard.append([InlineKeyboardButton(f"⏹️ 停止 {name}", callback_data=f"stoplist:{uid}")])
+        info_lines.append(f"• {name}{pause_status}\n  歌单ID: {playlist_id}，进度: {current}/{total}")
+        # 每个用户一行：暂停/恢复 + 停止
+        if is_paused:
+            pause_btn = InlineKeyboardButton("▶️ 恢复", callback_data=f"resume_pl:{uid}")
+        else:
+            pause_btn = InlineKeyboardButton("⏸️ 暂停", callback_data=f"pause_pl:{uid}")
+        stop_btn = InlineKeyboardButton("⏹️ 停止", callback_data=f"stoplist:{uid}")
+        keyboard.append([pause_btn, stop_btn])
 
-    text = "📊 <b>正在播放歌单的用户</b>\n\n" + "\n\n".join(info_lines) + "\n\n点击下方按钮停止对应用户的歌单播放："
+    text = "📊 <b>正在播放歌单的用户</b>\n\n" + "\n\n".join(info_lines) + "\n\n点击下方按钮控制对应用户的歌单播放（暂停/恢复/停止）："
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
