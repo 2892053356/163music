@@ -1280,17 +1280,32 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                 # 歌单播放只允许使用代理URL，禁止Render下载
                 proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
                 proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-                logger.info(f"歌单续播 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
-                msg = await bot.send_audio(
-                    chat_id=chat_id,
-                    audio=proxy_url,
-                    filename=f"{song['name']}.mp3",
-                    title=song["name"],
-                    performer=song["artist"],
-                    caption=caption,
-                    parse_mode="HTML",
-                    duration=song["duration"] // 1000 if song["duration"] else None,
-                )
+                
+                # 带重试的发送（最多2次）
+                msg = None
+                for attempt in range(2):
+                    try:
+                        if attempt > 0:
+                            logger.info(f"歌单续播 🔄 重试{attempt}/{1}: {song['name']} - {song['artist']}")
+                            await asyncio.sleep(1)
+                        logger.info(f"歌单续播 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
+                        msg = await bot.send_audio(
+                            chat_id=chat_id,
+                            audio=proxy_url,
+                            filename=f"{song['name']}.mp3",
+                            title=song["name"],
+                            performer=song["artist"],
+                            caption=caption,
+                            parse_mode="HTML",
+                            duration=song["duration"] // 1000 if song["duration"] else None,
+                        )
+                        break  # 成功，跳出重试循环
+                    except Exception as e:
+                        if attempt == 0:
+                            logger.warning(f"歌单续播第{attempt+1}次失败，准备重试: {song['name']} - {e}")
+                        else:
+                            raise  # 最后一次失败，抛出异常
+                
                 if msg and msg.audio and msg.audio.file_id:
                     db.set_file_id(song["id"], msg.audio.file_id)
             else:
@@ -1524,34 +1539,43 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退代理: {e}")
 
-    # 缓存未命中：优先使用外部代理URL发送，失败时回退到Render下载+上传
+    # 缓存未命中：优先使用外部代理URL发送（带重试），失败时回退到Render下载+上传
     if config.AUDIO_PROXY_URL:
-        try:
-            _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}"
-            proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-            logger.info(f"播放歌曲 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']} (用户={user_label}) -> {_proxy_url[:80]}...")
-            msg = await context.bot.send_audio(
-                chat_id=chat_id,
-                message_thread_id=message_thread_id,
-                audio=_proxy_url,
-                filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
-                title=song["name"],
-                performer=song["artist"],
-                caption=caption,
-                parse_mode="HTML",
-                thumbnail=song["cover"] if song["cover"] else None,
-                duration=song["duration"] // 1000 if song["duration"] else None,
-                reply_markup=reply_markup,
-            )
-            if edit:
-                await update.callback_query.delete_message()
-            # 发送成功后保存 file_id 到缓存
-            if msg and msg.audio and msg.audio.file_id:
-                await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
-            active_search_plays.discard(user.id)
-            return
-        except Exception as e:
-            logger.warning(f"代理URL发送失败，回退Render下载: {e}")
+        _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}"
+        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+        
+        # 带重试的代理发送（最多2次）
+        for attempt in range(2):
+            try:
+                if attempt > 0:
+                    logger.info(f"播放歌曲 🔄 代理重试{attempt}/{1}: {song['name']} - {song['artist']}")
+                    await asyncio.sleep(1)
+                logger.info(f"播放歌曲 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']} (用户={user_label}) -> {_proxy_url[:80]}...")
+                msg = await context.bot.send_audio(
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    audio=_proxy_url,
+                    filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
+                    title=song["name"],
+                    performer=song["artist"],
+                    caption=caption,
+                    parse_mode="HTML",
+                    thumbnail=song["cover"] if song["cover"] else None,
+                    duration=song["duration"] // 1000 if song["duration"] else None,
+                    reply_markup=reply_markup,
+                )
+                if edit:
+                    await update.callback_query.delete_message()
+                # 发送成功后保存 file_id 到缓存
+                if msg and msg.audio and msg.audio.file_id:
+                    await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+                active_search_plays.discard(user.id)
+                return
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"代理URL第{attempt+1}次发送失败，准备重试: {e}")
+                else:
+                    logger.warning(f"代理URL发送失败（已重试），回退Render下载: {e}")
     
     # 代理失败或未配置代理URL，回退到Render下载+上传
     logger.info(f"播放歌曲 🖥️ 使用Render下载: {song['name']} - {song['artist']} (用户={user_label})")
