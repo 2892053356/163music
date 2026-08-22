@@ -913,20 +913,28 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text(f"🔍 正在获取歌单 {playlist_id} ...")
 
     try:
-        # 优化：优先从缓存读取完整歌单，未命中则加载全部歌曲（分批处理）
+        # 先获取歌单详情，得到总歌曲数量
+        playlist_detail = await asyncio.to_thread(api._post, "/weapi/v6/playlist/detail", {"id": playlist_id, "n": 10000, "s": 0})
+        total_track_count = len(playlist_detail.get("playlist", {}).get("trackIds", []))
+        playlist_name = playlist_detail.get("playlist", {}).get("name", str(playlist_id))
+        logger.info(f"/playlist 歌单ID={playlist_id} 名称={playlist_name} 总歌曲数={total_track_count}")
+
+        # 检查缓存是否完整（缓存歌曲数等于总歌曲数）
         full_cached = _get_cached_playlist(playlist_id)
-        if full_cached:
+        if full_cached and len(full_cached) >= total_track_count:
             songs = full_cached
-            logger.info(f"/playlist 歌单ID={playlist_id} 从缓存读取全部{len(songs)}首")
+            logger.info(f"/playlist 歌单ID={playlist_id} 从缓存读取全部{len(songs)}首（完整）")
         else:
-            # 先加载前100首快速响应
-            songs = await _load_playlist_songs(playlist_id, limit=100, use_cache=False)
-            await status.edit_text(f"🔍 已加载前{len(songs)}首，正在加载全部歌曲...")
-            # 后台加载全部歌曲（分批处理，每批500首）
-            all_songs = await _load_playlist_songs(playlist_id, limit=10000, use_cache=True)
-            if all_songs and len(all_songs) > len(songs):
-                songs = all_songs
-                logger.info(f"/playlist 歌单ID={playlist_id} 全部加载完成，共{len(songs)}首")
+            if full_cached:
+                logger.info(f"/playlist 歌单ID={playlist_id} 缓存不完整（{len(full_cached)}/{total_track_count}），清除缓存重新加载")
+                db._exec("DEL", f"playlist:{playlist_id}:songs")
+
+            # 显示加载进度
+            await status.edit_text(f"🔍 正在加载歌单《{playlist_name}》（共{total_track_count}首）...")
+
+            # 加载全部歌曲（分批处理，每批500首）
+            songs = await _load_playlist_songs(playlist_id, limit=10000, use_cache=True)
+            logger.info(f"/playlist 歌单ID={playlist_id} 全部加载完成，共{len(songs)}首")
     except Exception as e:
         logger.error(f"获取歌单失败: {e}")
         await status.edit_text("❌ 获取歌单失败，请检查歌单ID是否正确。")
@@ -948,7 +956,7 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await status.edit_text(
-        f"📀 <b>歌单</b>（共{len(songs)}首）\n\n请选择播放方式：",
+        f"📀 <b>歌单《{playlist_name}》</b>（共{len(songs)}首）\n\n请选择播放方式：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML",
     )
