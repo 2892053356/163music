@@ -286,7 +286,8 @@ def _song_caption(song: dict) -> str:
 
 
 async def _send_audio_with_fallback(context, chat_id, song, quality="standard", caption=None, 
-                                      message_thread_id=None, use_cache=True, log_prefix="", bot=None):
+                                      message_thread_id=None, use_cache=True, log_prefix="", bot=None,
+                                      user_id=None):
     """
     通用音频发送函数，支持多级代理回退：file_id缓存 → CF反向代理 → Vercel → Render下载
     
@@ -300,6 +301,7 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
         use_cache: 是否使用file_id缓存
         log_prefix: 日志前缀
         bot: Bot实例（可选，优先使用）
+        user_id: 用户ID（可选，用于5秒去重时间戳记录）
     
     返回:
         (success: bool, file_id: str or None, proxy_type: str)
@@ -313,6 +315,14 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
     if not _bot:
         logger.error(f"{log_prefix}❌ 没有可用的bot实例")
         return False, None, "none"
+    
+    # 记录发送时间戳的辅助函数（5秒去重）
+    def _record_sent():
+        if user_id is not None:
+            global playlist_sent_songs
+            if user_id not in playlist_sent_songs:
+                playlist_sent_songs[user_id] = {}
+            playlist_sent_songs[user_id][song_id] = time.time()
     
     # 1. 优先使用 file_id 缓存
     if use_cache:
@@ -351,18 +361,27 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                             is_wrong_title = True
                     
                     if is_wrong_title:
-                        logger.warning(f"{log_prefix}⚠️ file_id缓存标题不正确: 实际='{actual_title}' 期望='{expected_name}'，清除缓存重新上传")
-                        db._exec("DEL", f"cache:file_id:{song_id}")
-                        # 继续使用代理或Render下载重新发送
+                        logger.warning(f"{log_prefix}⚠️ file_id缓存标题不正确: 实际='{actual_title}' 期望='{expected_name}'，删除消息并清除缓存重新上传")
+                        # 删除刚才发送的错误标题消息
+                        try:
+                            await _bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                        except Exception as del_e:
+                            logger.warning(f"{log_prefix}删除错误标题消息失败: {del_e}")
+                        # 清除缓存
+                        db.delete_file_id(song_id)
+                        # 继续使用代理或Render下载重新发送（不return）
                     else:
+                        # 标题正确，记录时间戳并返回
+                        _record_sent()
                         return True, cached, "file_id"
                 else:
+                    _record_sent()
                     return True, cached, "file_id"
                     
             except Exception as e:
                 logger.warning(f"{log_prefix}file_id缓存发送失败，清除失效缓存并回退代理: {e}")
                 # 发送失败，清除可能失效的file_id缓存
-                db._exec("DEL", f"cache:file_id:{song_id}")
+                db.delete_file_id(song_id)
     
     # 2. 构建代理列表（歌单缓存优先CF反向代理，然后Vercel）
     proxy_list = []
@@ -396,6 +415,8 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
             if msg and msg.audio and msg.audio.file_id:
                 db.set_file_id(song_id, msg.audio.file_id)
             
+            # 记录发送时间戳（5秒去重）
+            _record_sent()
             return True, msg.audio.file_id if msg and msg.audio else None, proxy_type
             
         except Exception as e:
@@ -436,6 +457,8 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
         if msg and msg.audio and msg.audio.file_id:
             db.set_file_id(song_id, msg.audio.file_id)
         
+        # 记录发送时间戳（5秒去重）
+        _record_sent()
         return True, msg.audio.file_id if msg and msg.audio else None, "Render"
         
     except Exception as e:
@@ -1136,10 +1159,10 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     context, chat_id, song,
                     quality=db.get_quality(),
                     caption=caption,
-                    log_prefix=f"歌单播放 [{idx}/{len(songs)}] "
+                    log_prefix=f"歌单播放 [{idx}/{len(songs)}] ",
+                    user_id=user_id
                 )
-                # 记录发送时间戳（5秒去重）
-                playlist_sent_songs[user_id][song["id"]] = time.time()
+                # 时间戳已在_send_audio_with_fallback内部记录
                 if success_flag:
                     success += 1
                 else:
