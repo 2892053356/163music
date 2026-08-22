@@ -385,16 +385,12 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                 # 发送失败，清除可能失效的file_id缓存
                 db.delete_file_id(song_id)
     
-    # 2. 构建代理列表（歌单缓存优先CF反向代理，然后Vercel）
+    # 2. 构建代理列表（CF反向代理）
     proxy_list = []
     
     # CF反向代理（如果配置了）
     if config.CF_PROXY_URL:
         proxy_list.append((config.CF_PROXY_URL, "CF反向代理"))
-    
-    # Vercel代理（如果配置了且与CF不同）
-    if config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
-        proxy_list.append((config.AUDIO_PROXY_URL, "Vercel"))
     
     # 3. 尝试每个代理
     for proxy_base, proxy_type in proxy_list:
@@ -427,7 +423,7 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
             logger.warning(f"{log_prefix}{proxy_type}代理失败，尝试下一个: {e}")
             continue
     
-    # 4. 所有代理失败，回退到 Render 下载
+    # 3. 所有代理失败，回退到 Render 下载
     try:
         logger.info(f"{log_prefix}🖥️ 使用Render下载: {song['name']} - {song['artist']}")
         url = await asyncio.to_thread(api.get_first_song_url, song_id, quality)
@@ -1696,7 +1692,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退代理: {e}")
 
-    # 4级回退：CF代理 → 网易云直链 → Vercel代理 → Render下载
+    # 3级回退：CF代理 → 网易云直链 → Render下载
     # 每一步发送成功后检查音频文件名是否正确，不正确则删除消息继续下一个回退
     from urllib.parse import quote
     
@@ -1711,11 +1707,6 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     # 2. 网易云直链（Telegram自行下载，零Render流量）
     if url:
         fallback_list.append(("网易云直链", url))
-    
-    # 3. Vercel 代理
-    if config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
-        vercel_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}"
-        fallback_list.append(("Vercel代理", vercel_url))
     
     # 尝试每个回退
     for proxy_type, proxy_url in fallback_list:
@@ -1772,7 +1763,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             logger.warning(f"播放歌曲 ❌ {proxy_type}失败: {song['name']} - {e}")
             continue
     
-    # 4. 所有回退失败，使用 Render 下载+上传（使用优化的下载模块）
+    # 3. 所有回退失败，使用 Render 下载+上传（使用优化的下载模块）
     logger.info(f"播放歌曲 🖥️ 使用Render下载（优化版）: {song['name']} - {song['artist']} (用户={user_label})")
     if not url:
         err_msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
@@ -1984,7 +1975,7 @@ async def _cache_song_to_admin(context, song, url=None):
     """使用多级代理回退发送音频到管理员私聊，获取file_id后保存缓存。返回file_id或None。"""
     cache_admin_id = 8684066933  # 内联缓存专用管理员
     try:
-        # 内联缓存：CF反向代理 → Vercel → Render 三级回退
+        # 内联缓存：CF反向代理 → Render 二级回退
         success_flag, file_id, proxy_type = await _send_audio_with_fallback(
             context, cache_admin_id, song,
             quality=config.MUSIC_QUALITY,
@@ -3128,7 +3119,7 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
-                    # 歌单缓存：CF反向代理 → Vercel → Render 三级回退
+                    # 歌单缓存：CF反向代理 → Render 二级回退
                     caption = f"歌单缓存 {idx}/{len(to_cache)}"
                     success_flag, file_id, proxy_type = await _send_audio_with_fallback(
                         context, config.ADMIN_ID, song,
@@ -3257,7 +3248,7 @@ async def cmd_cacheuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
-                    # 漫游缓存：CF反向代理 → Vercel → Render 三级回退
+                    # 漫游缓存：CF反向代理 → Render 二级回退
                     caption = f"漫游缓存 {idx}/{len(to_cache)}"
                     success_flag, file_id, proxy_type = await _send_audio_with_fallback(
                         context, config.ADMIN_ID, song,
@@ -3829,7 +3820,7 @@ def main():
                         try:
                             _song_start = time.time()
                             logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🎵 开始处理《{song['name']}》- {song['artist']}")
-                            # 闲时缓存：CF反向代理 → Vercel → Render 三级回退
+                            # 闲时缓存：CF反向代理 → Render 二级回退
                             caption = f"♻️ 闲时缓存 {idx}/{len(to_cache)}"
                             success_flag, file_id, proxy_type = await _send_audio_with_fallback(
                                 None, 8684066933, song,
