@@ -289,7 +289,7 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                                       message_thread_id=None, use_cache=True, log_prefix="", bot=None,
                                       user_id=None):
     """
-    通用音频发送函数，支持多级代理回退：file_id缓存 → CF反向代理 → Vercel → Render下载
+    通用音频发送函数，支持多级代理回退：file_id缓存 → CF反向代理 → Render下载
     
     参数:
         context: Bot context（可为None，如果提供了bot参数）
@@ -1145,17 +1145,73 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     continue
 
                 caption = _song_caption(song)
-                success_flag, file_id, proxy_type = await _send_audio_with_fallback(
-                    context, chat_id, song,
-                    quality=db.get_quality(),
-                    caption=caption,
-                    log_prefix=f"歌单播放 [{idx}/{len(songs)}] ",
-                    user_id=user_id
-                )
-                # 时间戳已在_send_audio_with_fallback内部记录
-                if success_flag:
+                cached = db.get_file_id(song["id"])
+                if cached:
+                    try:
+                        await context.bot.send_audio(
+                            chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
+                        )
+                        success += 1
+                        db.update_playlist_index(user_id, idx)
+                        await asyncio.sleep(1)
+                        continue
+                    except Exception as e:
+                        logger.warning(f"歌单播放 file_id缓存失败: {song['name']} - {e}")
+                        db.delete_file_id(song["id"])
+                
+                # 歌单播放：CF代理 → 网易云直链 二回退机制
+                from urllib.parse import quote
+                cf_proxy_url = f"{config.CF_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}&name={quote(song['name'])}" if config.CF_PROXY_URL else ""
+                
+                sent = False
+                # 回退1：CF代理
+                if cf_proxy_url:
+                    try:
+                        logger.info(f"歌单播放 🌐 使用CF代理: {song['name']} - {song['artist']}")
+                        msg = await context.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=cf_proxy_url,
+                            filename=f"{song['name']}.mp3",
+                            title=song["name"],
+                            performer=song["artist"],
+                            caption=caption,
+                            parse_mode="HTML",
+                            duration=song["duration"] // 1000 if song["duration"] else None,
+                        )
+                        if msg and msg.audio and msg.audio.file_id:
+                            db.set_file_id(song["id"], msg.audio.file_id)
+                        sent = True
+                    except Exception as e:
+                        logger.warning(f"歌单播放 CF代理失败，尝试直链: {song['name']} - {e}")
+                
+                # 回退2：网易云直链
+                if not sent:
+                    try:
+                        direct_url = api.get_first_song_url(song["id"], level=db.get_quality())
+                        if direct_url:
+                            logger.info(f"歌单播放 🔗 使用网易云直链: {song['name']} - {song['artist']}")
+                            msg = await context.bot.send_audio(
+                                chat_id=chat_id,
+                                audio=direct_url,
+                                filename=f"{song['name']}.mp3",
+                                title=song["name"],
+                                performer=song["artist"],
+                                caption=caption,
+                                parse_mode="HTML",
+                                duration=song["duration"] // 1000 if song["duration"] else None,
+                            )
+                            if msg and msg.audio and msg.audio.file_id:
+                                db.set_file_id(song["id"], msg.audio.file_id)
+                            sent = True
+                        else:
+                            logger.warning(f"歌单播放 直链为空: {song['name']}")
+                    except Exception as e:
+                        logger.warning(f"歌单播放 直链失败: {song['name']} - {e}")
+                
+                if sent:
                     success += 1
                 else:
+                    logger.warning(f"歌单播放 所有回退都失败: {song['name']}")
                     failed += 1
                 # 更新播放进度到Redis（每首完成后更新）
                 db.update_playlist_index(user_id, idx)
@@ -1365,6 +1421,17 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                 db.remove_active_playlist(user_id)
                 return
         try:
+            # 5秒去重：同一用户5秒内不能发送相同歌曲
+            global playlist_sent_songs
+            now = time.time()
+            if user_id not in playlist_sent_songs:
+                playlist_sent_songs[user_id] = {}
+            last_sent = playlist_sent_songs[user_id].get(song["id"], 0)
+            if now - last_sent < 5:
+                logger.info(f"歌单续播去重：用户={user_id} 歌曲={song['name']}({song['id']}) 5秒内已发送，跳过")
+                db.update_playlist_index(user_id, idx)
+                continue
+
             cached = db.get_file_id(song["id"])
             caption = _song_caption(song)
             if cached:
