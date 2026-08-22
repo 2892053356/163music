@@ -1050,6 +1050,18 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 )
                 db.remove_active_playlist(user_id)
                 return
+            # 检查用户暂停和全局暂停
+            while db.check_playlist_paused(user_id) or db.check_all_playlist_paused():
+                await asyncio.sleep(2)
+                # 暂停时也检查停止标志
+                if db.check_playlist_stop_flag(user_id):
+                    logger.info(f"歌单播放：用户={user_id} 被管理员停止（暂停中），已播放{idx-1}首")
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
+                    )
+                    db.remove_active_playlist(user_id)
+                    return
             # 中等优先级：最近3秒有用户活动则暂停（比缓存排行榜高，比用户单曲低）
             # 高优先级：有用户正在搜索播放时暂停（内联搜索 > 普通搜索 > 歌单播放）
             while time.time() - last_user_activity < 3 or active_search_plays:
@@ -3184,6 +3196,92 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """用户暂停自己的歌单播放"""
+    user = update.effective_user
+    active = db.get_active_playlist(user.id)
+    if not active:
+        await update.message.reply_text("📭 你当前没有正在播放的歌单。")
+        return
+
+    db.set_playlist_pause(user.id)
+    playlist_id = active.get("playlist_id", "?")
+    current = active.get("current_index", 0)
+    total = active.get("total", 0)
+    await update.message.reply_text(
+        f"⏸️ 已暂停你的歌单播放\n\n"
+        f"歌单ID: {playlist_id}\n"
+        f"进度: {current}/{total}\n\n"
+        f"使用 /resume 恢复播放"
+    )
+    logger.info(f"用户暂停歌单：用户={user.id} 歌单={playlist_id} 进度={current}/{total}")
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """用户恢复自己的歌单播放"""
+    user = update.effective_user
+    active = db.get_active_playlist(user.id)
+    if not active:
+        await update.message.reply_text("📭 你当前没有正在播放的歌单。")
+        return
+
+    if not db.check_playlist_paused(user.id):
+        await update.message.reply_text("▶️ 你的歌单没有被暂停。")
+        return
+
+    db.clear_playlist_pause(user.id)
+    playlist_id = active.get("playlist_id", "?")
+    current = active.get("current_index", 0)
+    total = active.get("total", 0)
+    await update.message.reply_text(
+        f"▶️ 已恢复你的歌单播放\n\n"
+        f"歌单ID: {playlist_id}\n"
+        f"进度: {current}/{total}"
+    )
+    logger.info(f"用户恢复歌单：用户={user.id} 歌单={playlist_id} 进度={current}/{total}")
+
+
+async def cmd_pauseall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：暂停所有用户的歌单播放"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    active_users = db.get_active_playlist_users()
+    if not active_users:
+        await update.message.reply_text("📭 当前没有用户正在播放歌单。")
+        return
+
+    db.set_all_playlist_pause()
+    await update.message.reply_text(
+        f"⏸️ 已暂停所有用户的歌单播放\n\n"
+        f"影响用户数: {len(active_users)}\n\n"
+        f"使用 /resumeall 恢复所有播放"
+    )
+    logger.info(f"管理员暂停所有歌单：管理员={user.id} 影响用户数={len(active_users)}")
+
+
+async def cmd_resumeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：恢复所有用户的歌单播放"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+
+    if not db.check_all_playlist_paused():
+        await update.message.reply_text("▶️ 当前没有全局暂停。")
+        return
+
+    db.clear_all_playlist_pause()
+    active_users = db.get_active_playlist_users()
+    await update.message.reply_text(
+        f"▶️ 已恢复所有用户的歌单播放\n\n"
+        f"恢复用户数: {len(active_users)}"
+    )
+    logger.info(f"管理员恢复所有歌单：管理员={user.id} 恢复用户数={len(active_users)}")
+
+
 async def cmd_refreshcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员手动更新闲时缓存歌单：清除今日完成标记，触发重新缓存"""
     user = update.effective_user
@@ -3313,6 +3411,10 @@ def main():
     application.add_handler(CommandHandler("cacheplaylist", cmd_cacheplaylist))
     application.add_handler(CommandHandler("cacheuser", cmd_cacheuser))
     application.add_handler(CommandHandler("playliststop", cmd_playlist_stop))
+    application.add_handler(CommandHandler("pause", cmd_pause))
+    application.add_handler(CommandHandler("resume", cmd_resume))
+    application.add_handler(CommandHandler("pauseall", cmd_pauseall))
+    application.add_handler(CommandHandler("resumeall", cmd_resumeall))
     application.add_handler(CommandHandler("refreshcache", cmd_refreshcache))
 
     # 管理员上传 .txt 文件设置 cookie
