@@ -1606,8 +1606,8 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 else:
                     logger.warning(f"代理URL发送失败（已重试），回退Render下载: {e}")
     
-    # 代理失败或未配置代理URL，回退到Render下载+上传
-    logger.info(f"播放歌曲 🖥️ 使用Render下载: {song['name']} - {song['artist']} (用户={user_label})")
+    # 代理失败或未配置代理URL，回退到Render下载+上传（使用优化的下载模块）
+    logger.info(f"播放歌曲 🖥️ 使用Render下载（优化版）: {song['name']} - {song['artist']} (用户={user_label})")
     if not url:
         err_msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
         if edit:
@@ -1617,16 +1617,25 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         active_search_plays.discard(user.id)
         return
     try:
-        resp = await asyncio.to_thread(requests_get, url, 45)
-        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-            err_msg = f"❌ 音频下载失败（status={resp.status_code}），请稍后重试。\n\n{_song_caption(song)}"
+        # 使用优化的下载模块（并发限制+自动重试+超时+MD5校验）
+        from downloader import download_audio
+        result = await download_audio(
+            url,
+            timeout=60,
+            max_retries=3,
+            log_prefix=f"[播放 {song['name']}] "
+        )
+        
+        if not result.success:
+            err_msg = f"❌ 音频下载失败: {result.error}\n\n{_song_caption(song)}"
             if edit:
                 await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
             else:
                 await update.message.reply_text(err_msg, parse_mode="HTML")
             active_search_plays.discard(user.id)
             return
-        audio_bytes = io.BytesIO(resp.content)
+        
+        audio_bytes = io.BytesIO(result.content)
         audio_bytes = _tag_mp3(audio_bytes, song)
         msg = await context.bot.send_audio(
             chat_id=chat_id,
