@@ -324,8 +324,11 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                     chat_id=chat_id,
                     message_thread_id=message_thread_id,
                     audio=cached,
+                    title=song["name"],
+                    performer=song["artist"],
                     caption=caption,
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    duration=song["duration"] // 1000 if song.get("duration") else None,
                 )
                 return True, cached, "file_id"
             except Exception as e:
@@ -352,6 +355,7 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
                 audio=proxy_url,
+                filename=f"{song['name']}.mp3",
                 title=song["name"],
                 performer=song["artist"],
                 caption=caption,
