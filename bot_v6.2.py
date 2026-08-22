@@ -1567,17 +1567,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=query.message.reply_markup
         )
     elif data.startswith("stoplist:"):
-        # 管理员停止用户歌单播放
-        if not _is_admin(user.id):
-            await query.answer("⛔ 权限不足", show_alert=True)
-            return
+        # 停止用户歌单播放（管理员可停止任意用户，普通用户只能停止自己）
         target_uid = int(data.split(":", 1)[1])
+        if user.id != target_uid and not _is_admin(user.id):
+            await query.answer("⛔ 你只能停止自己的歌单", show_alert=True)
+            return
         db.set_playlist_stop_flag(target_uid)
-        # 通知被停止的用户
-        try:
-            await context.bot.send_message(target_uid, "⏹️ 您的歌单播放已被管理员停止。")
-        except Exception:
-            pass
+        # 如果是管理员停止其他用户，通知被停止的用户
+        if user.id != target_uid:
+            try:
+                await context.bot.send_message(target_uid, "⏹️ 您的歌单播放已被管理员停止。")
+            except Exception:
+                pass
         await query.answer("✅ 已发送停止指令", show_alert=True)
         await query.edit_message_text(f"✅ 已停止用户 {target_uid} 的歌单播放。")
     elif data == "cache_now":
@@ -3448,6 +3449,53 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"用户恢复歌单：用户={user.id} 歌单={playlist_id} 进度={current}/{total}")
 
 
+async def cmd_myplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """用户查看并控制自己的歌单播放"""
+    user = update.effective_user
+    active = db.get_active_playlist(user.id)
+    if not active:
+        await update.message.reply_text("📭 你当前没有正在播放的歌单。\n\n使用 /playlist <歌单ID> 开始播放歌单。")
+        return
+
+    playlist_id = active.get("playlist_id", "?")
+    current = active.get("current_index", 0)
+    total = active.get("total", 0)
+    start_time = active.get("start_time", 0)
+    is_paused = db.check_playlist_paused(user.id)
+
+    import datetime
+    if start_time:
+        start_str = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        start_str = "未知"
+
+    status_text = "⏸️ 已暂停" if is_paused else "▶️ 播放中"
+    progress_text = f"{current}/{total}"
+    if total > 0:
+        percent = int(current / total * 100)
+        progress_text += f" ({percent}%)"
+
+    text = (
+        f"🎵 <b>我的歌单</b>\n\n"
+        f"状态: {status_text}\n"
+        f"歌单ID: <code>{playlist_id}</code>\n"
+        f"进度: {progress_text}\n"
+        f"开始时间: {start_str}\n\n"
+        f"点击下方按钮控制歌单播放："
+    )
+
+    # 控制按钮
+    keyboard = []
+    if is_paused:
+        keyboard.append([InlineKeyboardButton("▶️ 恢复歌单", callback_data=f"resume_pl:{user.id}")])
+    else:
+        keyboard.append([InlineKeyboardButton("⏸️ 暂停歌单", callback_data=f"pause_pl:{user.id}")])
+    keyboard.append([InlineKeyboardButton("⏹️ 停止歌单", callback_data=f"stoplist:{user.id}")])
+
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    logger.info(f"用户查看歌单：用户={user.id} 歌单={playlist_id} 进度={current}/{total} 暂停={is_paused}")
+
+
 async def cmd_pauseall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员：暂停所有用户的歌单播放"""
     user = update.effective_user
@@ -3620,6 +3668,7 @@ def main():
     application.add_handler(CommandHandler("playliststop", cmd_playlist_stop))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
+    application.add_handler(CommandHandler("myplaylist", cmd_myplaylist))
     application.add_handler(CommandHandler("pauseall", cmd_pauseall))
     application.add_handler(CommandHandler("resumeall", cmd_resumeall))
     application.add_handler(CommandHandler("refreshcache", cmd_refreshcache))
