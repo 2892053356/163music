@@ -530,105 +530,60 @@ async def audio_proxy_handler(request):
         return web.Response(status=400, text="Invalid song_id")
 
     try:
-        # 三级回退：CF反向代理 → Vercel代理 → 直接从网易云下载
+        # 直接从网易云下载音频（内联搜索专用，不使用其他代理）
         audio_content = None
-        _proxy_used = None
         
-        # 1. 尝试 CF 反向代理
-        if config.CF_PROXY_URL:
-            try:
-                cf_url = f"{config.CF_PROXY_URL.rstrip('/')}/audio/{sid}?quality={quality}"
-                logger.info(f"代理端点 song_id={sid} 尝试CF反向代理")
-                resp = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _download_session.get, cf_url,
-                        timeout=(10, 20),
-                        headers={"Referer": "https://music.163.com/"}
-                    ),
-                    timeout=25
-                )
-                if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
-                    audio_content = resp.content
-                    _proxy_used = "CF反向代理"
-                    logger.info(f"代理端点 song_id={sid} CF反向代理成功 大小={len(audio_content)}bytes")
-            except Exception as e:
-                logger.warning(f"代理端点 song_id={sid} CF反向代理失败: {type(e).__name__}: {e}")
-        
-        # 2. 尝试 Vercel 代理
-        if not audio_content and config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
-            try:
-                vercel_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{sid}?quality={quality}"
-                logger.info(f"代理端点 song_id={sid} 尝试Vercel代理")
-                resp = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _download_session.get, vercel_url,
-                        timeout=(10, 20),
-                        headers={"Referer": "https://music.163.com/"}
-                    ),
-                    timeout=25
-                )
-                if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
-                    audio_content = resp.content
-                    _proxy_used = "Vercel"
-                    logger.info(f"代理端点 song_id={sid} Vercel代理成功 大小={len(audio_content)}bytes")
-            except Exception as e:
-                logger.warning(f"代理端点 song_id={sid} Vercel代理失败: {type(e).__name__}: {e}")
-        
-        # 3. 直接从网易云下载（最后回退）
-        if not audio_content:
-            logger.info(f"代理端点 song_id={sid} 代理均失败，直接从网易云下载")
-            # 获取播放地址（3秒超时）
-            def _get_url(level):
-                url_result = api.get_song_url([sid], level=level)
-                for item in url_result.get("data", []):
-                    if item.get("id") == sid and item.get("url"):
-                        return item["url"]
-                return None
+        # 获取播放地址（3秒超时）
+        def _get_url(level):
+            url_result = api.get_song_url([sid], level=level)
+            for item in url_result.get("data", []):
+                if item.get("id") == sid and item.get("url"):
+                    return item["url"]
+            return None
 
-            # 下载音频：每种音质只试1次，连接超时5秒，双音质备用，总时间≤10秒
-            for try_quality in [quality, "higher"]:
+        # 下载音频：每种音质只试1次，连接超时5秒，双音质备用，总时间≤10秒
+        for try_quality in [quality, "higher"]:
+            try:
+                play_url = await asyncio.wait_for(
+                    asyncio.to_thread(_get_url, try_quality), timeout=3
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 获取地址超时")
+                continue
+            if not play_url:
+                continue
+            if play_url.startswith("http://"):
+                play_url = "https://" + play_url[7:]
+            # 每种音质重试1次，连接超时15秒，读取超时30秒，总超时45秒
+            for _retry in range(2):
                 try:
-                    play_url = await asyncio.wait_for(
-                        asyncio.to_thread(_get_url, try_quality), timeout=3
+                    resp = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _download_session.get, play_url,
+                            timeout=(15, 30),
+                            headers={"Referer": "https://music.163.com/"}
+                        ),
+                        timeout=45
                     )
+                    if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
+                        audio_content = resp.content
+                        _retry_info = f" (第{_retry+1}次尝试)" if _retry > 0 else ""
+                        logger.info(f"代理端点 song_id={sid} 音质={try_quality} 直接下载成功{_retry_info} 大小={len(audio_content)}bytes")
+                        break
+                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
                 except asyncio.TimeoutError:
-                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 获取地址超时")
-                    continue
-                if not play_url:
-                    continue
-                if play_url.startswith("http://"):
-                    play_url = "https://" + play_url[7:]
-                # 每种音质重试1次，连接超时15秒，读取超时30秒，总超时45秒
-                for _retry in range(2):
-                    try:
-                        resp = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                _download_session.get, play_url,
-                                timeout=(15, 30),
-                                headers={"Referer": "https://music.163.com/"}
-                            ),
-                            timeout=45
-                        )
-                        if resp.status_code == 200 and resp.content and len(resp.content) > 1000:
-                            audio_content = resp.content
-                            _proxy_used = "直接下载"
-                            _retry_info = f" (第{_retry+1}次尝试)" if _retry > 0 else ""
-                            logger.info(f"代理端点 song_id={sid} 音质={try_quality} 直接下载成功{_retry_info} 大小={len(audio_content)}bytes")
-                            break
-                        logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载超时 (第{_retry+1}次尝试)")
-                        if _retry == 0:
-                            await asyncio.sleep(1)
-                            continue
-                    except Exception as e:
-                        logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 异常: {type(e).__name__}: {e}")
-                        if _retry == 0:
-                            await asyncio.sleep(1)
-                            continue
-                    break  # 非超时异常或成功，跳出重试循环
-                if audio_content:
-                    break
+                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 下载超时 (第{_retry+1}次尝试)")
+                    if _retry == 0:
+                        await asyncio.sleep(1)
+                        continue
+                except Exception as e:
+                    logger.warning(f"代理端点 song_id={sid} 音质={try_quality} 异常: {type(e).__name__}: {e}")
+                    if _retry == 0:
+                        await asyncio.sleep(1)
+                        continue
+                break  # 非超时异常或成功，跳出重试循环
+            if audio_content:
+                break
 
         if not audio_content:
             return web.Response(status=502, text="Audio download failed")
@@ -1572,8 +1527,23 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     user_label = f"{user.username or user.first_name or user.id}"
     logger.info(f"播放歌曲 用户={user_label}(id={user.id}) song_id={song_id}")
 
+    # 5秒去重：同一用户5秒内不能发送相同歌曲
+    global playlist_sent_songs, active_search_plays
+    now = time.time()
+    if user.id not in playlist_sent_songs:
+        playlist_sent_songs[user.id] = {}
+    last_sent = playlist_sent_songs[user.id].get(song_id, 0)
+    if now - last_sent < 5:
+        logger.info(f"播放歌曲去重：用户={user.id} 歌曲={song_id} 5秒内已发送，跳过")
+        if edit:
+            try:
+                await update.callback_query.answer("⏳ 请稍候，5秒内不要重复发送相同歌曲")
+            except Exception:
+                pass
+        active_search_plays.discard(user.id)
+        return
+
     # 标记搜索播放活动（优先级：搜索播放 > 歌单播放）
-    global active_search_plays
     active_search_plays.add(user.id)
 
     # 获取 chat_id 和 message_thread_id（支持话题群组）
@@ -1655,10 +1625,15 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
                 audio=cached_file_id,
+                title=song["name"],
+                performer=song["artist"],
                 caption=caption,
                 parse_mode="HTML",
+                duration=song["duration"] // 1000 if song.get("duration") else None,
                 reply_markup=reply_markup,
             )
+            # 记录发送时间戳（5秒去重）
+            playlist_sent_songs[user.id][song_id] = time.time()
             if edit:
                 await update.callback_query.delete_message()
             active_search_plays.discard(user.id)
@@ -1689,6 +1664,8 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 await update.callback_query.delete_message()
             if msg and msg.audio and msg.audio.file_id:
                 await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+            # 记录发送时间戳（5秒去重）
+            playlist_sent_songs[user.id][song_id] = time.time()
             logger.info(f"播放歌曲 ✅ 直接发送网易云直链成功: {song['name']} - {song['artist']} (零Render流量)")
             active_search_plays.discard(user.id)
             return
@@ -1725,6 +1702,8 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 # 发送成功后保存 file_id 到缓存
                 if msg and msg.audio and msg.audio.file_id:
                     await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+                # 记录发送时间戳（5秒去重）
+                playlist_sent_songs[user.id][song_id] = time.time()
                 active_search_plays.discard(user.id)
                 return
             except Exception as e:
@@ -1781,6 +1760,8 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             await update.callback_query.delete_message()
         if msg and msg.audio and msg.audio.file_id:
             await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+        # 记录发送时间戳（5秒去重）
+        playlist_sent_songs[user.id][song_id] = time.time()
         active_search_plays.discard(user.id)
         return
     except Exception as e:
