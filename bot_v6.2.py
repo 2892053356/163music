@@ -780,8 +780,8 @@ async def _render_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE
     songs = context.user_data.get("search_songs", [])
     keyword = context.user_data.get("search_keyword", "")
     is_group = context.user_data.get("search_is_group", False)
-    # 群组每页5条（15条分3页），私聊每页10条
-    page_size = 5 if is_group else 10
+    # 群组和私聊都每页5条
+    page_size = 5
     total = len(songs)
     total_pages = (total + page_size - 1) // page_size
     page = max(0, min(page, total_pages - 1))
