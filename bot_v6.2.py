@@ -346,7 +346,7 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                     actual_title = (msg.audio.title or "").strip()
                     expected_name = (song["name"] or "").strip()
                     
-                    # 判断标题是否不正确：为空、纯数字、等于song_id、或与期望名称完全不同
+                    # 判断标题是否不正确：为空、纯数字、等于song_id、或与期望名称明显不同
                     is_wrong_title = False
                     if not actual_title:
                         is_wrong_title = True
@@ -354,10 +354,12 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                         is_wrong_title = True
                     elif actual_title == str(song_id):
                         is_wrong_title = True
-                    elif expected_name and actual_title != expected_name:
+                    elif expected_name:
                         # 标题与期望名称不同，可能是旧缓存的错误标题
-                        # 只在差异明显时才清除（避免因为特殊字符导致误判）
-                        if len(actual_title) < 2 or actual_title.replace(" ", "") != expected_name.replace(" ", ""):
+                        # 忽略大小写和空格差异，只在明显不同时才清除（避免误判导致重复下载）
+                        actual_clean = actual_title.replace(" ", "").lower()
+                        expected_clean = expected_name.replace(" ", "").lower()
+                        if len(actual_title) < 2 or actual_clean != expected_clean:
                             is_wrong_title = True
                     
                     if is_wrong_title:
@@ -1730,7 +1732,10 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             )
             # 检查缓存音频标题是否正确（修复历史缓存标题为数字ID的问题）
             _cached_title = getattr(msg.audio, 'title', '') if msg and msg.audio else ''
-            _title_ok = bool(_cached_title) and not _cached_title.isdigit() and _cached_title != str(song_id) and _cached_title == song["name"]
+            # 忽略大小写和空格差异，只在明显不正确时才清除（避免误判导致重复下载）
+            _cached_clean = _cached_title.replace(" ", "").lower() if _cached_title else ""
+            _expected_clean = song["name"].replace(" ", "").lower() if song.get("name") else ""
+            _title_ok = bool(_cached_title) and not _cached_title.isdigit() and _cached_title != str(song_id) and _cached_clean == _expected_clean
             if not _title_ok:
                 logger.warning(f"file_id缓存标题不正确: 缓存标题='{_cached_title}' 正确标题='{song['name']}'，删除消息并清除缓存重新上传")
                 # 删除刚才发送的错误标题消息
