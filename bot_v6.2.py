@@ -1621,7 +1621,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     if cached_file_id:
         try:
             logger.info(f"播放歌曲 📦 使用file_id缓存: {song['name']} - {song['artist']} (用户={user_label})")
-            await context.bot.send_audio(
+            msg = await context.bot.send_audio(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
                 audio=cached_file_id,
@@ -1632,12 +1632,20 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 duration=song["duration"] // 1000 if song.get("duration") else None,
                 reply_markup=reply_markup,
             )
-            # 记录发送时间戳（5秒去重）
-            playlist_sent_songs[user.id][song_id] = time.time()
-            if edit:
-                await update.callback_query.delete_message()
-            active_search_plays.discard(user.id)
-            return
+            # 检查缓存音频标题是否正确（修复历史缓存标题为数字ID的问题）
+            _cached_title = getattr(msg.audio, 'title', '') if msg and msg.audio else ''
+            _title_ok = bool(_cached_title) and not _cached_title.isdigit() and _cached_title != str(song_id) and _cached_title == song["name"]
+            if not _title_ok:
+                logger.warning(f"file_id缓存标题不正确: 缓存标题='{_cached_title}' 正确标题='{song['name']}'，清除缓存重新上传")
+                await asyncio.to_thread(db.delete_file_id, song_id)
+                # 不return，继续执行后面的代理/下载逻辑重新上传
+            else:
+                # 标题正确，记录发送时间戳并返回
+                playlist_sent_songs[user.id][song_id] = time.time()
+                if edit:
+                    await update.callback_query.delete_message()
+                active_search_plays.discard(user.id)
+                return
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退代理: {e}")
 
