@@ -4,6 +4,10 @@
 [![GitHub Release Date](https://img.shields.io/github/release-date/XiOuDi/163music?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
 [![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/XiOuDi/163music/total?style=for-the-badge)](https://github.com/XiOuDi/163music/releases)
 
+> 🚀 **Render 专用部署版已发布！** 专为 Render 平台优化，只需 2 个环境变量即可部署。
+> 
+> 👉 [https://github.com/XiOuDi/163bot-render](https://github.com/XiOuDi/163bot-render)
+
 支持搜索、播放网易云音乐的 Telegram 机器人，带内联搜索、管理员功能、音质设置、Cookie自动刷新和闲时自动缓存。
 
 作者：https://t.me/xioudi_a
