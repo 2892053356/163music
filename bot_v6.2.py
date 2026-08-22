@@ -742,10 +742,10 @@ async def _do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword
     """执行搜索并展示结果按钮（分页）"""
     status_msg = await update.message.reply_text(f"🔍 正在搜索「{keyword}」...")
 
-    # 群组中只请求15条，私聊请求50条
+    # 群组中只请求10条，私聊请求25条
     chat = update.effective_chat
     is_group = chat and chat.type in ("group", "supergroup")
-    search_limit = 15 if is_group else 50
+    search_limit = 10 if is_group else 25
 
     try:
         songs = await asyncio.to_thread(api.search_songs_simple, keyword, search_limit)
