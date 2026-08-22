@@ -397,7 +397,9 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
     # 3. 尝试每个代理
     for proxy_base, proxy_type in proxy_list:
         try:
-            proxy_url = f"{proxy_base.rstrip('/')}/audio/{song_id}?quality={quality}"
+            # 传递歌曲名称参数，让代理设置正确的Content-Disposition文件名
+            from urllib.parse import quote
+            proxy_url = f"{proxy_base.rstrip('/')}/audio/{song_id}?quality={quality}&name={quote(song['name'])}"
             logger.info(f"{log_prefix}🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
             
             msg = await _bot.send_audio(
@@ -1659,7 +1661,13 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             _cached_title = getattr(msg.audio, 'title', '') if msg and msg.audio else ''
             _title_ok = bool(_cached_title) and not _cached_title.isdigit() and _cached_title != str(song_id) and _cached_title == song["name"]
             if not _title_ok:
-                logger.warning(f"file_id缓存标题不正确: 缓存标题='{_cached_title}' 正确标题='{song['name']}'，清除缓存重新上传")
+                logger.warning(f"file_id缓存标题不正确: 缓存标题='{_cached_title}' 正确标题='{song['name']}'，删除消息并清除缓存重新上传")
+                # 删除刚才发送的错误标题消息
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                except Exception as del_e:
+                    logger.warning(f"删除错误标题消息失败: {del_e}")
+                # 清除缓存
                 await asyncio.to_thread(db.delete_file_id, song_id)
                 # 不return，继续执行后面的代理/下载逻辑重新上传
             else:
@@ -1705,7 +1713,8 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     
     # 方案A失败：使用外部代理URL发送（带重试），失败时回退到Render下载+上传
     if config.AUDIO_PROXY_URL:
-        _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}"
+        from urllib.parse import quote
+        _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}"
         proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
         
         # 带重试的代理发送（最多2次）
