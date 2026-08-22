@@ -213,6 +213,10 @@ class UpstashDB:
     def set_file_id(self, song_id: int, file_id: str):
         self._exec("SET", f"cache:file_id:{song_id}", file_id)
 
+    def delete_file_id(self, song_id: int):
+        """删除file_id缓存（用于标题不正确的缓存自动清理）"""
+        self._exec("DEL", f"cache:file_id:{song_id}")
+
     # ---- 用户搜索历史（用于闲时缓存扩展） ----
     def add_searched_song(self, song_id: int):
         """记录用户搜索过的歌曲ID"""
