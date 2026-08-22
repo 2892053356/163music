@@ -107,6 +107,34 @@ class UpstashDB:
         """设置音质（standard/higher）"""
         self._exec("SET", "bot:quality", quality)
 
+    # ---- Bot 配置（从 Database 加载，减少环境变量配置）----
+    def get_bot_token(self) -> str:
+        """获取 Telegram Bot Token"""
+        result = self._exec("GET", "bot:token")
+        return result if result else ""
+
+    def set_bot_token(self, token: str):
+        """设置 Telegram Bot Token"""
+        self._exec("SET", "bot:token", token)
+
+    def get_admin_id(self) -> int:
+        """获取主管理员 ID"""
+        result = self._exec("GET", "bot:admin_id")
+        return int(result) if result else 0
+
+    def set_admin_id(self, admin_id: int):
+        """设置主管理员 ID"""
+        self._exec("SET", "bot:admin_id", str(admin_id))
+
+    def get_cf_proxy_url(self) -> str:
+        """获取 CF 代理 URL"""
+        result = self._exec("GET", "bot:cf_proxy_url")
+        return result if result else ""
+
+    def set_cf_proxy_url(self, url: str):
+        """设置 CF 代理 URL"""
+        self._exec("SET", "bot:cf_proxy_url", url)
+
     # ---- Cookie检测时间（重启后继续检测周期）----
     def get_last_cookie_check(self) -> int:
         """获取上次Cookie检测时间戳"""
