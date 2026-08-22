@@ -2221,16 +2221,31 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             )
         else:
-            # 未缓存：使用内联专用代理（Netlify，速度快无CPU限制），未配置则回退到通用代理
+            # 未缓存：采用与正常播放一致的三级代理优先级：CF反向代理 → Vercel → Render
             cover_param = ""
             _cover = song.get("cover") or song.get("picUrl") or song.get("album_pic") or (song.get("al") or {}).get("picUrl")
             if _cover:
                 cover_param = f"&cover={quote(_cover, safe='')}"
-            # 内联搜索优先使用 INLINE_PROXY_URL（Netlify），未配置则回退到 AUDIO_PROXY_URL（CF）
-            _proxy_base = config.INLINE_PROXY_URL or config.AUDIO_PROXY_URL or config.WEBHOOK_URL.rstrip('/')
-            _proxy_type = "Vercel" if "vercel" in (_proxy_base or "") else "Netlify" if config.INLINE_PROXY_URL else ("CF" if config.AUDIO_PROXY_URL else "Render")
+            
+            # 构建代理列表（优先级：CF反向代理 → Vercel → Render）
+            _proxy_candidates = []
+            if config.CF_PROXY_URL:
+                _proxy_candidates.append((config.CF_PROXY_URL, "CF反向代理"))
+            if config.AUDIO_PROXY_URL and config.AUDIO_PROXY_URL != config.CF_PROXY_URL:
+                _proxy_candidates.append((config.AUDIO_PROXY_URL, "Vercel"))
+            # Render 本地代理作为最后回退
+            if config.WEBHOOK_URL:
+                _proxy_candidates.append((config.WEBHOOK_URL.rstrip('/'), "Render"))
+            
+            # 选择第一个可用的代理（内联搜索无法动态回退，选择优先级最高的）
+            if _proxy_candidates:
+                _proxy_base, _proxy_type = _proxy_candidates[0]
+            else:
+                _proxy_base = config.WEBHOOK_URL.rstrip('/') if config.WEBHOOK_URL else ""
+                _proxy_type = "Render"
+            
             proxy_url = f"{_proxy_base}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
-            logger.info(f"内联结果 代理歌曲 {song['name']} 代理类型={_proxy_type} proxy_url长度={len(proxy_url)}")
+            logger.info(f"内联结果 代理歌曲 {song['name']} 代理类型={_proxy_type} (候选数={len(_proxy_candidates)}) proxy_url长度={len(proxy_url)}")
             results.append(
                 InlineQueryResultAudio(
                     id=f"url_{song['id']}",
