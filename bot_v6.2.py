@@ -430,19 +430,18 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                 # 发送失败，清除可能失效的file_id缓存
                 db.delete_file_id(song_id)
     
-    # 2. 构建代理列表（CF反向代理）- 先获取网易云直链，再通过/proxy转发
+    # 2. 构建代理列表（已禁用CF代理，直接使用Render下载）
     proxy_list = []
     
-    # CF反向代理（如果配置了）
-    if config.CF_PROXY_URL:
-        # 先获取网易云直链
-        direct_url = await asyncio.to_thread(api.get_first_song_url, song_id, quality)
-        if direct_url:
-            from urllib.parse import quote
-            cf_proxy_url = f"{config.CF_PROXY_URL.rstrip('/')}/proxy?url={quote(direct_url)}"
-            proxy_list.append((cf_proxy_url, "CF反向代理"))
+    # CF代理已禁用（连接超时），直接使用Render下载
+    # if config.CF_PROXY_URL:
+    #     direct_url = await asyncio.to_thread(api.get_first_song_url, song_id, quality)
+    #     if direct_url:
+    #         from urllib.parse import quote
+    #         cf_proxy_url = f"{config.CF_PROXY_URL.rstrip('/')}/proxy?url={quote(direct_url)}"
+    #         proxy_list.append((cf_proxy_url, "CF反向代理"))
     
-    # 3. 尝试每个代理
+    # 3. 尝试每个代理（当前为空，直接到Render下载）
     for proxy_url, proxy_type in proxy_list:
         try:
             logger.info(f"{log_prefix}🌐 使用{proxy_type}: {song['name']} - {song['artist']}")
@@ -993,6 +992,11 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/playlist 歌单ID或链接 — 显示歌单，选择列表播放或全部播放（仅限私聊）"""
     user = update.effective_user
     chat = update.effective_chat
+
+    # 检查歌单播放功能是否启用
+    if not db.is_playlist_enabled():
+        await update.message.reply_text("⚠️ 歌单播放功能已被管理员禁用。\n\n请使用 /play 搜索歌曲，或使用内联搜索 @XiOuDi163_bot 歌曲名。")
+        return
 
     # 仅限私聊使用
     if chat and chat.type != "private":
@@ -2584,6 +2588,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 /cacheplaylist 歌单ID — 缓存指定歌单全部歌曲\n"
         "👤 /cacheuser 用户ID — 缓存指定网易云账号的所有歌单（漫游歌曲）\n"
         "⏹️ /playliststop — 查看/停止正在播放歌单的用户\n"
+        "🔀 /toggleplaylist — 开关歌单播放功能\n"
         "♻️ /autocache — 开关闲时自动缓存\n"
         "📊 /cachestatus — 查看缓存状态（含立即缓存按钮）\n"
         "🔄 /refreshcache — 手动更新闲时缓存歌单（清除今日标记并重新缓存）\n\n"
@@ -3455,6 +3460,29 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def cmd_toggle_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员：开关歌单播放功能"""
+    user = update.effective_user
+    if not _is_admin(user.id):
+        await update.message.reply_text("⛔ 权限不足。")
+        return
+    
+    current = db.is_playlist_enabled()
+    new_state = not current
+    db.set_playlist_enabled(new_state)
+    
+    status = "✅ 已启用" if new_state else "❌ 已禁用"
+    emoji = "🟢" if new_state else "🔴"
+    
+    await update.message.reply_text(
+        f"{emoji} 歌单播放功能{status}\n\n"
+        f"当前状态：{'允许用户使用 /playlist 播放歌单' if new_state else '用户无法使用 /playlist 播放歌单'}\n\n"
+        f"再次使用 /toggleplaylist 可切换状态",
+        parse_mode="HTML"
+    )
+    logger.info(f"管理员 {user.id} 切换歌单播放功能: {'启用' if new_state else '禁用'}")
+
+
 async def cmd_refreshcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员手动更新闲时缓存歌单：清除今日完成标记，触发重新缓存"""
     user = update.effective_user
@@ -3584,6 +3612,7 @@ def main():
     application.add_handler(CommandHandler("cacheplaylist", cmd_cacheplaylist))
     application.add_handler(CommandHandler("cacheuser", cmd_cacheuser))
     application.add_handler(CommandHandler("playliststop", cmd_playlist_stop))
+    application.add_handler(CommandHandler("toggleplaylist", cmd_toggle_playlist))
     application.add_handler(CommandHandler("refreshcache", cmd_refreshcache))
 
     # 管理员上传 .txt 文件设置 cookie
