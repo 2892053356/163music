@@ -155,7 +155,8 @@ async function getCookie(env) {
   // 其次从 Upstash 读取
   if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
     try {
-      const resp = await fetch(`${env.UPSTASH_REDIS_REST_URL}/GET/bot:cookie`, {
+      const cacheKey = 'bot:cookie';
+      const resp = await fetch(`${env.UPSTASH_REDIS_REST_URL}/GET/${encodeURIComponent(cacheKey)}`, {
         headers: { 'Authorization': `Bearer ${env.UPSTASH_REDIS_REST_TOKEN}` }
       });
       const data = await resp.json();
@@ -165,6 +166,37 @@ async function getCookie(env) {
     }
   }
   return null;
+}
+
+/**
+ * 调试端点：检查配置和连接状态
+ */
+async function debugInfo(env) {
+  const info = {
+    upstash_configured: !!(env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN),
+    cookie_env_configured: !!env.NETEASE_COOKIE,
+    upstash_url: env.UPSTASH_REDIS_REST_URL ? env.UPSTASH_REDIS_REST_URL.replace(/\/\/[^@]*@/, '//***@') : null,
+  };
+  
+  // 测试 Upstash 连接
+  if (info.upstash_configured) {
+    try {
+      const resp = await fetch(`${env.UPSTASH_REDIS_REST_URL}/PING`, {
+        headers: { 'Authorization': `Bearer ${env.UPSTASH_REDIS_REST_TOKEN}` }
+      });
+      const data = await resp.json();
+      info.upstash_ping = data.result || 'error';
+      
+      // 读取 Cookie
+      const cookie = await getCookie(env);
+      info.cookie_from_upstash = cookie ? `已获取 (${cookie.length} 字符)` : '未找到';
+      info.cookie_preview = cookie ? cookie.substring(0, 30) + '...' : null;
+    } catch (e) {
+      info.upstash_error = e.message;
+    }
+  }
+  
+  return info;
 }
 
 /**
@@ -240,6 +272,15 @@ export default {
     // 健康检查
     if (url.pathname === '/health') {
       return new Response('OK', { status: 200, headers: corsHeaders });
+    }
+    
+    // 调试端点
+    if (url.pathname === '/debug') {
+      const info = await debugInfo(env);
+      return new Response(JSON.stringify(info, null, 2), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
     
     // 预检请求
