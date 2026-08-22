@@ -30,10 +30,11 @@ PROXY_URL = os.environ.get("PROXY_URL", "")
 # 留空则使用Render本地代理（消耗出站流量）
 CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "https://cf-music-proxy.l2892053356.workers.dev")
 
-# 音频代理URL（普通搜索/播放使用，推荐Netlify，CF Workers IP被网易云CDN屏蔽）
+# 音频代理URL（普通搜索/播放/歌单缓存使用，推荐CF反向代理→Netlify）
+# CF反向代理：Telegram通过CF访问，CF转发给Netlify下载网易云音频
 # 留空则使用 WEBHOOK_URL 作为代理
-# 格式: https://your-site.netlify.app （不要末尾斜杠）
-AUDIO_PROXY_URL = os.environ.get("AUDIO_PROXY_URL", "https://mellifluous-pothos-dafce2.netlify.app")
+# 格式: https://your-worker.workers.dev （不要末尾斜杠）
+AUDIO_PROXY_URL = os.environ.get("AUDIO_PROXY_URL", "https://cf-music-proxy.l2892053356.workers.dev")
 
 # 内联搜索专用代理URL（内联搜索使用，推荐Netlify，速度快无CPU限制）
 # 留空则回退使用 AUDIO_PROXY_URL
