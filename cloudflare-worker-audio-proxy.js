@@ -15,16 +15,29 @@
 
 // weapi 加密所需
 const CRYPTO = {
-  // RSA 公钥（网易云固定）
+  // RSA 公钥指数（十六进制）= 65537
   RSA_PUB_KEY: "010001",
+  // RSA 公钥模数（网易云固定）
   RSA_MOD: "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7",
-  // 固定偏移量
+  // 固定第一个AES密钥
   NONCE: "0CoJUm6Qyw8W8jud",
   // 固定IV
   IV: "0102030405060708",
-  // 固定第二个密钥
-  SECOND_KEY: "0102030405060708"
 };
+
+/**
+ * 生成随机字符串（字母+数字）
+ */
+function randStr(length = 16) {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  const array = new Uint8Array(length);
+  crypto.getRandomValues(array);
+  for (let i = 0; i < length; i++) {
+    result += chars[array[i] % chars.length];
+  }
+  return result;
+}
 
 // 内存缓存（CF Workers 每个实例独立，存活时间不定）
 const memoryCache = new Map();
@@ -94,16 +107,22 @@ function rsaEncrypt(text, pubKey, modulus) {
 }
 
 /**
- * weapi 加密
+ * weapi 加密（与网易云官方实现一致）
+ * 1. JSON序列化
+ * 2. 第一次AES加密（固定密钥 NONCE）
+ * 3. 第二次AES加密（随机16位密钥）
+ * 4. RSA加密随机密钥
  */
 async function weapiEncrypt(params) {
   const jsonStr = JSON.stringify(params);
-  // 第一次 AES 加密
+  // 生成随机16位密钥
+  const secret = randStr(16);
+  // 第一次 AES 加密（固定密钥）
   const encText = await aesEncrypt(jsonStr, CRYPTO.NONCE, CRYPTO.IV);
-  // 第二次 AES 加密（使用固定的第二个密钥）
-  const encText2 = await aesEncrypt(encText, CRYPTO.SECOND_KEY, CRYPTO.IV);
-  // RSA 加密第二个密钥
-  const encSecKey = rsaEncrypt(CRYPTO.SECOND_KEY, CRYPTO.RSA_PUB_KEY, CRYPTO.RSA_MOD);
+  // 第二次 AES 加密（随机密钥）
+  const encText2 = await aesEncrypt(encText, secret, CRYPTO.IV);
+  // RSA 加密随机密钥
+  const encSecKey = rsaEncrypt(secret, CRYPTO.RSA_PUB_KEY, CRYPTO.RSA_MOD);
   return {
     params: encText2,
     encSecKey: encSecKey
