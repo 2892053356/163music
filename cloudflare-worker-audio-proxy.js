@@ -360,6 +360,9 @@ export default {
     const songName = url.searchParams.get('name') || `song_${songId}`;
     const artist = url.searchParams.get('artist') || '';
     const filename = `${songName}${artist ? ' - ' + artist : ''}.mp3`;
+    // 默认使用重定向模式（CF Workers IP 可能被网易云 CDN 屏蔽，导致流式转发返回 403）
+    // 可以通过 ?redirect=0 强制使用流式转发
+    const useRedirect = url.searchParams.get('redirect') !== '0';
     
     try {
       // 1. 检查内存缓存
@@ -367,7 +370,7 @@ export default {
       const memCached = memoryCache.get(memKey);
       if (memCached && Date.now() - memCached.time < CACHE_TTL) {
         console.log(`Memory cache hit: ${songId}`);
-        return proxyAudio(memCached.url, filename, corsHeaders);
+        return proxyAudio(memCached.url, filename, corsHeaders, useRedirect);
       }
       
       // 2. 检查 Upstash 缓存
@@ -375,7 +378,7 @@ export default {
       if (cachedUrl) {
         console.log(`Upstash cache hit: ${songId}`);
         memoryCache.set(memKey, { url: cachedUrl, time: Date.now() });
-        return proxyAudio(cachedUrl, filename, corsHeaders);
+        return proxyAudio(cachedUrl, filename, corsHeaders, useRedirect);
       }
       
       // 3. 调用网易云 API 获取直链
@@ -393,8 +396,8 @@ export default {
       memoryCache.set(memKey, { url: audioUrl, time: Date.now() });
       await setCachedAudioUrl(songId, quality, audioUrl, env);
       
-      // 5. 代理音频流
-      return proxyAudio(audioUrl, filename, corsHeaders);
+      // 5. 代理音频流（默认使用重定向模式，避免CF IP被屏蔽）
+      return proxyAudio(audioUrl, filename, corsHeaders, useRedirect);
       
     } catch (error) {
       console.error('Proxy error:', error);
@@ -407,18 +410,34 @@ export default {
 };
 
 /**
- * 代理音频流（流式转发）
+ * 代理音频流（流式转发）或重定向
  */
-async function proxyAudio(audioUrl, filename, corsHeaders) {
+async function proxyAudio(audioUrl, filename, corsHeaders, useRedirect = false) {
+  // 重定向模式：直接返回 302，让客户端（Telegram）直接从网易云 CDN 下载
+  // 避免 Cloudflare Workers IP 被网易云 CDN 屏蔽导致 403
+  if (useRedirect) {
+    return Response.redirect(audioUrl, 302);
+  }
+  
   const audioResponse = await fetchWithTimeout(audioUrl, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Referer': 'https://music.163.com/',
+      'Accept': '*/*',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Range': 'bytes=0-',
     },
   }, 30000);
   
   if (!audioResponse.ok) {
-    return new Response(JSON.stringify({ error: `音频源返回 ${audioResponse.status}` }), {
+    // 返回详细的错误信息，包括音频源 URL，方便调试
+    const errorInfo = {
+      error: `音频源返回 ${audioResponse.status}`,
+      audio_url: audioUrl.substring(0, 100) + '...',
+      audio_status: audioResponse.status,
+      audio_headers: Object.fromEntries(audioResponse.headers),
+    };
+    return new Response(JSON.stringify(errorInfo, null, 2), {
       status: 502,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
