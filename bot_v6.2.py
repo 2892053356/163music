@@ -1722,12 +1722,20 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             # 检查音频文件名称是否正确（修复数字ID文件名问题）
             actual_filename = (msg.audio.file_name or "") if msg and msg.audio else ""
             actual_title = (msg.audio.title or "") if msg and msg.audio else ""
-            # 文件名正确的条件：不为空、不以song_数字ID开头、标题与歌曲名匹配
-            filename_ok = bool(actual_filename) and not actual_filename.startswith(f"song_{song_id}")
+            
+            # 文件名检查：不为空、包含歌曲名称、不是纯数字ID、不以song_数字ID开头
+            expected_name_clean = song["name"].replace(" ", "").lower()
+            actual_filename_clean = actual_filename.replace(" ", "").lower()
+            filename_contains_name = expected_name_clean in actual_filename_clean
+            filename_is_digit = actual_filename.replace(".mp3", "").replace(".m4a", "").isdigit()
+            filename_starts_song_id = actual_filename.startswith(f"song_{song_id}")
+            filename_ok = bool(actual_filename) and filename_contains_name and not filename_is_digit and not filename_starts_song_id
+            
+            # 标题检查：不为空、不是纯数字、不等于song_id、与歌曲名匹配
             title_ok = bool(actual_title) and not actual_title.isdigit() and actual_title != str(song_id) and actual_title == song["name"]
             
             if not filename_ok or not title_ok:
-                logger.warning(f"播放歌曲 ⚠️ {proxy_type}文件名/标题不正确: 文件名='{actual_filename}' 标题='{actual_title}'，删除消息继续下一个回退")
+                logger.warning(f"播放歌曲 ⚠️ {proxy_type}文件名/标题不正确: 文件名='{actual_filename}' 标题='{actual_title}' (包含歌名={filename_contains_name} 纯数字={filename_is_digit})，删除消息继续下一个回退")
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
                 except Exception as del_e:
