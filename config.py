@@ -30,14 +30,15 @@ PROXY_URL = os.environ.get("PROXY_URL", "")
 # 留空则使用Render本地代理（消耗出站流量）
 CF_PROXY_URL = os.environ.get("CF_PROXY_URL", "https://cf-music-proxy.l2892053356.workers.dev")
 
-# 音频代理URL（普通搜索/播放使用，优先使用Cloudflare Workers，减少Render出站流量）
+# 音频代理URL（普通搜索/播放使用，推荐Netlify，CF Workers IP被网易云CDN屏蔽）
 # 留空则使用 WEBHOOK_URL 作为代理
-AUDIO_PROXY_URL = os.environ.get("AUDIO_PROXY_URL", CF_PROXY_URL)
+# 格式: https://your-site.netlify.app （不要末尾斜杠）
+AUDIO_PROXY_URL = os.environ.get("AUDIO_PROXY_URL", "https://mellifluous-pothos-dafce2.netlify.app")
 
 # 内联搜索专用代理URL（内联搜索使用，推荐Netlify，速度快无CPU限制）
 # 留空则回退使用 AUDIO_PROXY_URL
 # 格式: https://your-site.netlify.app （不要末尾斜杠）
-INLINE_PROXY_URL = os.environ.get("INLINE_PROXY_URL", "")
+INLINE_PROXY_URL = os.environ.get("INLINE_PROXY_URL", "https://mellifluous-pothos-dafce2.netlify.app")
 
 # Webhook 模式配置
 # Render 会自动设置 RENDER_EXTERNAL_URL 和 PORT
