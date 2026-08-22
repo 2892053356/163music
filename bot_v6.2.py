@@ -1140,6 +1140,10 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 db.remove_active_playlist(user_id)
                 return
             # 检查用户暂停和全局暂停
+            _user_paused = db.check_playlist_paused(user_id)
+            _all_paused = db.check_all_playlist_paused()
+            if _user_paused or _all_paused:
+                logger.info(f"歌单播放暂停：用户={user_id} 用户暂停={_user_paused} 全局暂停={_all_paused}，等待恢复...")
             while db.check_playlist_paused(user_id) or db.check_all_playlist_paused():
                 await asyncio.sleep(2)
                 # 暂停时也检查停止标志
@@ -1151,6 +1155,8 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     )
                     db.remove_active_playlist(user_id)
                     return
+            if _user_paused or _all_paused:
+                logger.info(f"歌单播放恢复：用户={user_id}，继续播放第{idx}首")
             # 中等优先级：最近3秒有用户活动则暂停（比缓存排行榜高，比用户单曲低）
             # 高优先级：有用户正在搜索播放时暂停（内联搜索 > 普通搜索 > 歌单播放）
             while time.time() - last_user_activity < 3 or active_search_plays:
