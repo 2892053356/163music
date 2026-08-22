@@ -275,6 +275,47 @@ def _fmt_duration(ms: int) -> str:
     return f"{sec // 60}:{sec % 60:02d}"
 
 
+def _is_wrong_audio_title(actual_title: str, expected_name: str, song_id: int) -> bool:
+    """
+    检测音频标题是否不正确（需要删除file_id缓存并重新上传）
+    
+    不正确的情况：
+    1. 标题为空
+    2. 标题是纯数字（歌曲id）
+    3. 标题等于song_id
+    4. 标题是长字母串（如file_id本身，长度>40且主要是字母数字）
+    5. 标题与期望名称明显不同（忽略大小写和空格）
+    """
+    if not actual_title or not actual_title.strip():
+        return True
+    
+    title = actual_title.strip()
+    
+    # 纯数字（歌曲id）
+    if title.isdigit():
+        return True
+    
+    # 等于song_id
+    if title == str(song_id):
+        return True
+    
+    # 长字母串检测：长度>40且主要是字母数字（如file_id CQACAgUAAxkDAAIE32qF...）
+    if len(title) > 40:
+        # 计算字母数字比例
+        alnum_count = sum(1 for c in title if c.isalnum())
+        if alnum_count / len(title) > 0.8:
+            return True
+    
+    # 与期望名称明显不同（忽略大小写和空格）
+    if expected_name:
+        actual_clean = title.replace(" ", "").lower()
+        expected_clean = expected_name.replace(" ", "").lower()
+        if actual_clean != expected_clean:
+            return True
+    
+    return False
+
+
 def _song_caption(song: dict) -> str:
     """生成歌曲信息文本"""
     return (
@@ -346,23 +387,8 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                     actual_title = (msg.audio.title or "").strip()
                     expected_name = (song["name"] or "").strip()
                     
-                    # 判断标题是否不正确：为空、纯数字、等于song_id、或与期望名称明显不同
-                    is_wrong_title = False
-                    if not actual_title:
-                        is_wrong_title = True
-                    elif actual_title.isdigit():
-                        is_wrong_title = True
-                    elif actual_title == str(song_id):
-                        is_wrong_title = True
-                    elif expected_name:
-                        # 标题与期望名称不同，可能是旧缓存的错误标题
-                        # 忽略大小写和空格差异，只在明显不同时才清除（避免误判导致重复下载）
-                        actual_clean = actual_title.replace(" ", "").lower()
-                        expected_clean = expected_name.replace(" ", "").lower()
-                        if actual_clean != expected_clean:
-                            is_wrong_title = True
-                    
-                    if is_wrong_title:
+                    # 使用通用错误标题检测函数
+                    if _is_wrong_audio_title(actual_title, expected_name, song_id):
                         logger.warning(f"{log_prefix}⚠️ file_id缓存标题不正确: 实际='{actual_title}' 期望='{expected_name}'，删除消息并清除缓存重新上传")
                         # 删除刚才发送的错误标题消息
                         try:
@@ -1148,13 +1174,24 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 cached = db.get_file_id(song["id"])
                 if cached:
                     try:
-                        await context.bot.send_audio(
+                        msg = await context.bot.send_audio(
                             chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
                         )
-                        success += 1
-                        db.update_playlist_index(user_id, idx)
-                        await asyncio.sleep(1)
-                        continue
+                        # 检查缓存音频标题是否正确
+                        _cached_title = getattr(msg.audio, 'title', '') if msg and msg.audio else ''
+                        if _is_wrong_audio_title(_cached_title, song["name"], song["id"]):
+                            logger.warning(f"歌单播放 file_id缓存标题不正确: 缓存标题='{_cached_title}' 正确标题='{song['name']}'，删除消息并清除缓存")
+                            try:
+                                await context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                            except Exception:
+                                pass
+                            db.delete_file_id(song["id"])
+                            # 不continue，继续使用代理重新发送
+                        else:
+                            success += 1
+                            db.update_playlist_index(user_id, idx)
+                            await asyncio.sleep(1)
+                            continue
                     except Exception as e:
                         logger.warning(f"歌单播放 file_id缓存失败: {song['name']} - {e}")
                         db.delete_file_id(song["id"])
@@ -1435,13 +1472,28 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
             cached = db.get_file_id(song["id"])
             caption = _song_caption(song)
             if cached:
-                await bot.send_audio(
-                    chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
-                )
-                success += 1
-                db.update_playlist_index(user_id, idx)
-                await asyncio.sleep(1)
-                continue
+                try:
+                    msg = await bot.send_audio(
+                        chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
+                    )
+                    # 检查缓存音频标题是否正确
+                    _cached_title = getattr(msg.audio, 'title', '') if msg and msg.audio else ''
+                    if _is_wrong_audio_title(_cached_title, song["name"], song["id"]):
+                        logger.warning(f"歌单续播 file_id缓存标题不正确: 缓存标题='{_cached_title}' 正确标题='{song['name']}'，删除消息并清除缓存")
+                        try:
+                            await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                        except Exception:
+                            pass
+                        db.delete_file_id(song["id"])
+                        # 不continue，继续使用代理重新发送
+                    else:
+                        success += 1
+                        db.update_playlist_index(user_id, idx)
+                        await asyncio.sleep(1)
+                        continue
+                except Exception as e:
+                    logger.warning(f"歌单续播 file_id缓存失败: {song['name']} - {e}")
+                    db.delete_file_id(song["id"])
             
             # 歌单播放：CF代理 → 网易云直链 二回退机制
             from urllib.parse import quote
@@ -1733,13 +1785,9 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
                 duration=song["duration"] // 1000 if song.get("duration") else None,
                 reply_markup=reply_markup,
             )
-            # 检查缓存音频标题是否正确（修复历史缓存标题为数字ID的问题）
+            # 检查缓存音频标题是否正确（修复历史缓存标题为数字ID或长字母的问题）
             _cached_title = getattr(msg.audio, 'title', '') if msg and msg.audio else ''
-            # 忽略大小写和空格差异，只在明显不正确时才清除（避免误判导致重复下载）
-            _cached_clean = _cached_title.replace(" ", "").lower() if _cached_title else ""
-            _expected_clean = song["name"].replace(" ", "").lower() if song.get("name") else ""
-            _title_ok = bool(_cached_title) and not _cached_title.isdigit() and _cached_title != str(song_id) and _cached_clean == _expected_clean
-            if not _title_ok:
+            if _is_wrong_audio_title(_cached_title, song["name"], song_id):
                 logger.warning(f"file_id缓存标题不正确: 缓存标题='{_cached_title}' 正确标题='{song['name']}'，删除消息并清除缓存重新上传")
                 # 删除刚才发送的错误标题消息
                 try:
