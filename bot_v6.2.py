@@ -359,7 +359,7 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                         # 忽略大小写和空格差异，只在明显不同时才清除（避免误判导致重复下载）
                         actual_clean = actual_title.replace(" ", "").lower()
                         expected_clean = expected_name.replace(" ", "").lower()
-                        if len(actual_title) < 2 or actual_clean != expected_clean:
+                        if actual_clean != expected_clean:
                             is_wrong_title = True
                     
                     if is_wrong_title:
