@@ -1276,22 +1276,14 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                 await bot.send_audio(
                     chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
                 )
-            else:
-                url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
-                if not url:
-                    failed += 1
-                    db.update_playlist_index(user_id, idx)
-                    continue
-                resp = await asyncio.to_thread(requests_get, url, 45)
-                if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                    failed += 1
-                    db.update_playlist_index(user_id, idx)
-                    continue
-                audio_bytes = io.BytesIO(resp.content)
-                audio_bytes = _tag_mp3(audio_bytes, song)
+            elif config.AUDIO_PROXY_URL:
+                # 歌单播放只允许使用代理URL，禁止Render下载
+                proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
+                proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                logger.info(f"歌单续播 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                 msg = await bot.send_audio(
                     chat_id=chat_id,
-                    audio=audio_bytes,
+                    audio=proxy_url,
                     filename=f"{song['name']}.mp3",
                     title=song["name"],
                     performer=song["artist"],
@@ -1301,6 +1293,12 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                 )
                 if msg and msg.audio and msg.audio.file_id:
                     db.set_file_id(song["id"], msg.audio.file_id)
+            else:
+                # 无代理配置时跳过（歌单播放禁止Render下载）
+                logger.info(f"歌单续播 ⏭️ {song['name']} - 无代理配置，跳过（歌单播放禁止Render下载）")
+                failed += 1
+                db.update_playlist_index(user_id, idx)
+                continue
             success += 1
             db.update_playlist_index(user_id, idx)
         except Exception as e:
@@ -1526,11 +1524,10 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
         except Exception as e:
             logger.warning(f"file_id缓存发送失败，回退代理: {e}")
 
-    # 缓存未命中：必须使用外部代理URL发送（禁止Render下载+上传）
+    # 缓存未命中：优先使用外部代理URL发送，失败时回退到Render下载+上传
     if config.AUDIO_PROXY_URL:
         try:
-            from urllib.parse import quote
-            _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}&artist={quote(song['artist'])}"
+            _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}"
             proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
             logger.info(f"播放歌曲 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']} (用户={user_label}) -> {_proxy_url[:80]}...")
             msg = await context.bot.send_audio(
@@ -1554,65 +1551,58 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             active_search_plays.discard(user.id)
             return
         except Exception as e:
-            logger.error(f"代理URL发送失败: {e}")
-            err_msg = f"❌ 音频发送失败（代理服务异常），请稍后重试。\n\n{_song_caption(song)}"
+            logger.warning(f"代理URL发送失败，回退Render下载: {e}")
+    
+    # 代理失败或未配置代理URL，回退到Render下载+上传
+    logger.info(f"播放歌曲 🖥️ 使用Render下载: {song['name']} - {song['artist']} (用户={user_label})")
+    if not url:
+        err_msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
+        if edit:
+            await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
+        else:
+            await update.message.reply_text(err_msg, parse_mode="HTML")
+        active_search_plays.discard(user.id)
+        return
+    try:
+        resp = await asyncio.to_thread(requests_get, url, 45)
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+            err_msg = f"❌ 音频下载失败（status={resp.status_code}），请稍后重试。\n\n{_song_caption(song)}"
             if edit:
                 await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
             else:
                 await update.message.reply_text(err_msg, parse_mode="HTML")
             active_search_plays.discard(user.id)
             return
-    else:
-        # 未配置代理URL，回退到Render下载+上传
-        logger.info(f"播放歌曲 🖥️ 无代理配置，使用Render下载: {song['name']} - {song['artist']} (用户={user_label})")
-        if not url:
-            err_msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
-            if edit:
-                await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
-            else:
-                await update.message.reply_text(err_msg, parse_mode="HTML")
-            active_search_plays.discard(user.id)
-            return
-        try:
-            resp = await asyncio.to_thread(requests_get, url, 45)
-            if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                err_msg = f"❌ 音频下载失败（status={resp.status_code}），请稍后重试。\n\n{_song_caption(song)}"
-                if edit:
-                    await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
-                else:
-                    await update.message.reply_text(err_msg, parse_mode="HTML")
-                active_search_plays.discard(user.id)
-                return
-            audio_bytes = io.BytesIO(resp.content)
-            audio_bytes = _tag_mp3(audio_bytes, song)
-            msg = await context.bot.send_audio(
-                chat_id=chat_id,
-                message_thread_id=message_thread_id,
-                audio=audio_bytes,
-                filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
-                title=song["name"],
-                performer=song["artist"],
-                caption=caption,
-                parse_mode="HTML",
-                thumbnail=song["cover"] if song["cover"] else None,
-                duration=song["duration"] // 1000 if song["duration"] else None,
-                reply_markup=reply_markup,
-            )
-            if edit:
-                await update.callback_query.delete_message()
-            if msg and msg.audio and msg.audio.file_id:
-                await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
-            active_search_plays.discard(user.id)
-            return
-        except Exception as e:
-            logger.error(f"Render下载发送失败: {e}")
-            err_msg = f"❌ 音频发送失败: {e}\n\n{_song_caption(song)}"
-            if edit:
-                await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
-            else:
-                await update.message.reply_text(err_msg, parse_mode="HTML")
-            active_search_plays.discard(user.id)
-            return
+        audio_bytes = io.BytesIO(resp.content)
+        audio_bytes = _tag_mp3(audio_bytes, song)
+        msg = await context.bot.send_audio(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+            audio=audio_bytes,
+            filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
+            title=song["name"],
+            performer=song["artist"],
+            caption=caption,
+            parse_mode="HTML",
+            thumbnail=song["cover"] if song["cover"] else None,
+            duration=song["duration"] // 1000 if song["duration"] else None,
+            reply_markup=reply_markup,
+        )
+        if edit:
+            await update.callback_query.delete_message()
+        if msg and msg.audio and msg.audio.file_id:
+            await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+        active_search_plays.discard(user.id)
+        return
+    except Exception as e:
+        logger.error(f"Render下载发送失败: {e}")
+        err_msg = f"❌ 音频发送失败: {e}\n\n{_song_caption(song)}"
+        if edit:
+            await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
+        else:
+            await update.message.reply_text(err_msg, parse_mode="HTML")
+        active_search_plays.discard(user.id)
+        return
 
 
 # 共享下载Session（连接复用）+ 重试适配器
@@ -1761,23 +1751,23 @@ async def _send_song_to_private(context, user_id: int, song_id: int):
 
 
 async def _cache_song_to_admin(context, song, url):
-    """下载歌曲并上传到管理员私聊，获取file_id后删除临时消息，保存缓存。返回file_id或None。"""
+    """使用代理URL发送音频到管理员私聊，获取file_id后删除临时消息，保存缓存。返回file_id或None。（歌单缓存禁止Render下载）"""
     cache_admin_id = 8684066933  # 内联缓存专用管理员
     try:
-        # 下载
-        resp = await asyncio.to_thread(requests_get, url, 45)
-        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-            logger.warning(f"内联缓存下载失败 song_id={song.get('id')} 状态={resp.status_code} 大小={len(resp.content) if resp.content else 0}")
+        # 歌单缓存只允许使用代理URL，禁止Render下载
+        if not config.AUDIO_PROXY_URL:
+            logger.warning(f"内联缓存跳过 song_id={song.get('id')} - 无代理配置（歌单缓存禁止Render下载）")
             return None
-        audio_bytes = io.BytesIO(resp.content)
-        audio_bytes = _tag_mp3(audio_bytes, song)
-        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-
+        
+        proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
+        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+        logger.info(f"内联缓存 🌐 使用{proxy_type}代理: {song.get('name')} - {song.get('artist')}")
+        
         # 上传到管理员私聊
         msg = await context.bot.send_audio(
             chat_id=cache_admin_id,
-            audio=audio_bytes,
-            filename=filename,
+            audio=proxy_url,
+            filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
             title=song["name"],
             performer=song["artist"],
             caption="🔄 内联缓存中...",
@@ -2930,9 +2920,11 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
-                    # 使用代理URL，让Telegram直接从代理下载音频，Render不需要下载（大幅减少出站流量）
+                    # 歌单缓存只允许使用代理URL，禁止Render下载
                     if config.AUDIO_PROXY_URL:
                         proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
+                        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                        logger.info(f"歌单缓存 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                         msg = await context.bot.send_audio(
                             chat_id=config.ADMIN_ID,
                             audio=proxy_url,
@@ -2942,27 +2934,10 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             duration=song["duration"] // 1000 if song.get("duration") else None,
                         )
                     else:
-                        # 无代理时回退到原方式（Render下载+上传）
-                        url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
-                        if not url:
-                            failed += 1
-                            continue
-                        resp = await asyncio.to_thread(requests_get, url, 45)
-                        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                            failed += 1
-                            continue
-                        audio_bytes = io.BytesIO(resp.content)
-                        audio_bytes = _tag_mp3(audio_bytes, song)
-                        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-                        msg = await context.bot.send_audio(
-                            chat_id=config.ADMIN_ID,
-                            audio=audio_bytes,
-                            filename=filename,
-                            title=song["name"],
-                            performer=song["artist"],
-                            caption=f"歌单缓存 {idx}/{len(to_cache)}",
-                            duration=song["duration"] // 1000 if song.get("duration") else None,
-                        )
+                        # 无代理配置时跳过（歌单缓存禁止Render下载）
+                        logger.info(f"歌单缓存 ⏭️ {song['name']} - 无代理配置，跳过（歌单缓存禁止Render下载）")
+                        failed += 1
+                        continue
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
                         success += 1
@@ -3084,9 +3059,11 @@ async def cmd_cacheuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"歌单缓存：▶️ 暂停结束，恢复缓存")
 
                 try:
-                    # 使用代理URL，让Telegram直接从代理下载音频，Render不需要下载（大幅减少出站流量）
+                    # 歌单缓存只允许使用代理URL，禁止Render下载
                     if config.AUDIO_PROXY_URL:
                         proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
+                        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                        logger.info(f"漫游缓存 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                         msg = await context.bot.send_audio(
                             chat_id=config.ADMIN_ID,
                             audio=proxy_url,
@@ -3096,27 +3073,10 @@ async def cmd_cacheuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             duration=song["duration"] // 1000 if song.get("duration") else None,
                         )
                     else:
-                        # 无代理时回退到原方式（Render下载+上传）
-                        url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
-                        if not url:
-                            failed += 1
-                            continue
-                        resp = await asyncio.to_thread(requests_get, url, 45)
-                        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                            failed += 1
-                            continue
-                        audio_bytes = io.BytesIO(resp.content)
-                        audio_bytes = _tag_mp3(audio_bytes, song)
-                        filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-                        msg = await context.bot.send_audio(
-                            chat_id=config.ADMIN_ID,
-                            audio=audio_bytes,
-                            filename=filename,
-                            title=song["name"],
-                            performer=song["artist"],
-                            caption=f"漫游缓存 {idx}/{len(to_cache)}",
-                            duration=song["duration"] // 1000 if song.get("duration") else None,
-                        )
+                        # 无代理配置时跳过（歌单缓存禁止Render下载）
+                        logger.info(f"漫游缓存 ⏭️ {song['name']} - 无代理配置，跳过（歌单缓存禁止Render下载）")
+                        failed += 1
+                        continue
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
                         success += 1
@@ -3662,7 +3622,7 @@ def main():
                         try:
                             _song_start = time.time()
                             logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🎵 开始处理《{song['name']}》- {song['artist']}")
-                            # 使用代理URL，让Telegram直接从代理下载音频，Render不需要下载（大幅减少出站流量）
+                            # 歌单缓存只允许使用代理URL，禁止Render下载（减少出站流量）
                             if config.AUDIO_PROXY_URL:
                                 proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
                                 logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🌐 使用代理URL: {proxy_url}")
@@ -3677,40 +3637,10 @@ def main():
                                 )
                                 _up_time = time.time() - _up_start
                             else:
-                                # 无代理时回退到原方式（Render下载+上传）
-                                url = await asyncio.to_thread(api.get_first_song_url, song["id"], config.MUSIC_QUALITY)
-                                if not url:
-                                    failed += 1
-                                    if db.enabled:
-                                        db._exec("SADD", "auto_cache:failed", song["id"])
-                                        db._exec("EXPIRE", "auto_cache:failed", 604800)
-                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 无播放地址（已加入放弃缓存）")
-                                    continue
-                                _dl_start = time.time()
-                                resp = await aiohttp_get(url, 45)
-                                _dl_time = time.time() - _dl_start
-                                if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                                    failed += 1
-                                    logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ❌ {song['name']} - 下载失败 status={resp.status_code} size={len(resp.content) if resp.content else 0}")
-                                    continue
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ⬇️ 下载完成 {song['name']} ({len(resp.content)//1024}KB, {_dl_time:.1f}s)")
-                                audio_bytes = io.BytesIO(resp.content)
-                                _tag_start = time.time()
-                                audio_bytes = await asyncio.to_thread(_tag_mp3, audio_bytes, song)
-                                _tag_time = time.time() - _tag_start
-                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] 🏷️ ID3标签完成 {song['name']} ({_tag_time:.1f}s)")
-                                filename = f"{song['name']} - {config.MUSIC_QUALITY}.mp3"
-                                _up_start = time.time()
-                                msg = await application.bot.send_audio(
-                                    chat_id=8684066933,
-                                    audio=audio_bytes,
-                                    filename=filename,
-                                    title=song["name"],
-                                    performer=song["artist"],
-                                    caption=f"♻️ 闲时缓存 {idx}/{len(to_cache)}",
-                                    duration=song["duration"] // 1000 if song.get("duration") else None,
-                                )
-                                _up_time = time.time() - _up_start
+                                # 无代理配置时跳过（歌单缓存禁止Render下载）
+                                failed += 1
+                                logger.info(f"闲时缓存 [{idx}/{len(to_cache)}] ⏭️ {song['name']} - 无代理配置，跳过（歌单缓存禁止Render下载）")
+                                continue
                             if msg and msg.audio and msg.audio.file_id:
                                 db.set_file_id(song["id"], msg.audio.file_id)
                                 success += 1
