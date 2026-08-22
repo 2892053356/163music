@@ -1093,13 +1093,31 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
     total_songs = len(songs)
     total_batches = (total_songs + BATCH_SIZE - 1) // BATCH_SIZE
 
+    # 构建歌单控制按钮（用户可暂停/恢复自己的歌单，管理员可控制所有用户）
+    playlist_buttons = [
+        [InlineKeyboardButton("⏸️ 暂停歌单", callback_data=f"pause_pl:{user_id}"),
+         InlineKeyboardButton("▶️ 恢复歌单", callback_data=f"resume_pl:{user_id}")]
+    ]
+    if _is_admin(user_id):
+        playlist_buttons.append([
+            InlineKeyboardButton("⏸️ 暂停所有用户", callback_data="pause_all_pl"),
+            InlineKeyboardButton("▶️ 恢复所有用户", callback_data="resume_all_pl")
+        ])
+    playlist_reply_markup = InlineKeyboardMarkup(playlist_buttons)
+
     if total_songs > BATCH_SIZE:
         await update.callback_query.edit_message_text(
             f"▶️ 歌单共 {total_songs} 首，将分 {total_batches} 批次播放（每批 {BATCH_SIZE} 首）...\n\n"
-            f"第 1/{total_batches} 批开始播放..."
+            f"第 1/{total_batches} 批开始播放...\n\n"
+            f"💡 点击下方按钮可暂停/恢复歌单播放",
+            reply_markup=playlist_reply_markup
         )
     else:
-        await update.callback_query.edit_message_text(f"▶️ 开始全部播放 {total_songs} 首歌曲...")
+        await update.callback_query.edit_message_text(
+            f"▶️ 开始全部播放 {total_songs} 首歌曲...\n\n"
+            f"💡 点击下方按钮可暂停/恢复歌单播放",
+            reply_markup=playlist_reply_markup
+        )
 
     # 保存播放状态到Redis（从第0首开始）
     db.save_active_playlist(user_id, playlist_id, songs, 0)
@@ -1486,6 +1504,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📀 <b>歌单</b>（共{len(songs)}首）\n\n请选择播放方式：",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML",
+        )
+    elif data.startswith("pause_pl:"):
+        # 暂停用户歌单播放
+        target_uid = int(data.split(":", 1)[1])
+        # 只能暂停自己的歌单，管理员可以暂停任意用户
+        if user.id != target_uid and not _is_admin(user.id):
+            await query.answer("⛔ 你只能暂停自己的歌单", show_alert=True)
+            return
+        db.set_playlist_pause(target_uid)
+        logger.info(f"歌单暂停：用户={user.id} 暂停用户={target_uid} 的歌单")
+        await query.answer("⏸️ 歌单已暂停", show_alert=True)
+        await query.edit_message_text(
+            f"⏸️ 歌单播放已暂停\n\n用户ID: {target_uid}\n\n点击「恢复歌单」按钮继续播放。",
+            reply_markup=query.message.reply_markup
+        )
+    elif data.startswith("resume_pl:"):
+        # 恢复用户歌单播放
+        target_uid = int(data.split(":", 1)[1])
+        # 只能恢复自己的歌单，管理员可以恢复任意用户
+        if user.id != target_uid and not _is_admin(user.id):
+            await query.answer("⛔ 你只能恢复自己的歌单", show_alert=True)
+            return
+        db.clear_playlist_pause(target_uid)
+        logger.info(f"歌单恢复：用户={user.id} 恢复用户={target_uid} 的歌单")
+        await query.answer("▶️ 歌单已恢复", show_alert=True)
+        await query.edit_message_text(
+            f"▶️ 歌单播放已恢复\n\n用户ID: {target_uid}\n\n正在继续播放歌单...",
+            reply_markup=query.message.reply_markup
+        )
+    elif data == "pause_all_pl":
+        # 管理员暂停所有用户歌单播放
+        if not _is_admin(user.id):
+            await query.answer("⛔ 权限不足", show_alert=True)
+            return
+        db.set_all_playlist_pause()
+        logger.info(f"管理员暂停所有用户歌单：操作人={user.id}")
+        await query.answer("⏸️ 已暂停所有用户歌单", show_alert=True)
+        await query.edit_message_text(
+            "⏸️ 所有用户歌单播放已暂停\n\n管理员操作\n\n点击「恢复所有用户」按钮继续播放。",
+            reply_markup=query.message.reply_markup
+        )
+    elif data == "resume_all_pl":
+        # 管理员恢复所有用户歌单播放
+        if not _is_admin(user.id):
+            await query.answer("⛔ 权限不足", show_alert=True)
+            return
+        db.clear_all_playlist_pause()
+        logger.info(f"管理员恢复所有用户歌单：操作人={user.id}")
+        await query.answer("▶️ 已恢复所有用户歌单", show_alert=True)
+        await query.edit_message_text(
+            "▶️ 所有用户歌单播放已恢复\n\n管理员操作\n\n正在继续播放所有歌单...",
+            reply_markup=query.message.reply_markup
         )
     elif data.startswith("stoplist:"):
         # 管理员停止用户歌单播放
