@@ -913,9 +913,20 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text(f"🔍 正在获取歌单 {playlist_id} ...")
 
     try:
-        # 方案2：懒加载 - 首次只加载前100首，快速响应
-        # 方案1+4：_load_playlist_songs 会优先从缓存读取，未命中则异步并发获取
-        songs = await _load_playlist_songs(playlist_id, limit=PLAYLIST_LAZY_LOAD_THRESHOLD, use_cache=True)
+        # 优化：优先从缓存读取完整歌单，未命中则加载全部歌曲（分批处理）
+        full_cached = _get_cached_playlist(playlist_id)
+        if full_cached:
+            songs = full_cached
+            logger.info(f"/playlist 歌单ID={playlist_id} 从缓存读取全部{len(songs)}首")
+        else:
+            # 先加载前100首快速响应
+            songs = await _load_playlist_songs(playlist_id, limit=100, use_cache=False)
+            await status.edit_text(f"🔍 已加载前{len(songs)}首，正在加载全部歌曲...")
+            # 后台加载全部歌曲（分批处理，每批500首）
+            all_songs = await _load_playlist_songs(playlist_id, limit=10000, use_cache=True)
+            if all_songs and len(all_songs) > len(songs):
+                songs = all_songs
+                logger.info(f"/playlist 歌单ID={playlist_id} 全部加载完成，共{len(songs)}首")
     except Exception as e:
         logger.error(f"获取歌单失败: {e}")
         await status.edit_text("❌ 获取歌单失败，请检查歌单ID是否正确。")
@@ -925,21 +936,10 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("😢 该歌单为空或无法访问。")
         return
 
-    logger.info(f"/playlist 歌单ID={playlist_id} 首次加载{len(songs)}首歌曲（懒加载）")
+    logger.info(f"/playlist 歌单ID={playlist_id} 共加载{len(songs)}首歌曲")
 
     # 存储歌单歌曲到context，供回调使用
     context.user_data[f"playlist_{playlist_id}"] = songs
-
-    # 方案2：如果歌单可能超过100首，在后台异步加载剩余歌曲
-    # 先检查缓存中是否有完整歌单
-    full_cached = _get_cached_playlist(playlist_id)
-    total_count = len(full_cached) if full_cached else len(songs)
-
-    if len(songs) >= PLAYLIST_LAZY_LOAD_THRESHOLD and not full_cached:
-        # 歌单可能超过100首，启动后台懒加载
-        chat_id = update.effective_chat.id
-        asyncio.create_task(_lazy_load_remaining(playlist_id, context, user.id, chat_id))
-        logger.info(f"/playlist 歌单ID={playlist_id} 启动后台懒加载剩余歌曲")
 
     # 显示选择模式
     keyboard = [
@@ -947,13 +947,8 @@ async def cmd_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("▶️ 全部播放（自动发送）", callback_data=f"pall:{playlist_id}")],
     ]
 
-    # 显示歌单信息，如果正在后台加载，提示用户
-    loading_hint = ""
-    if playlist_lazy_loading.get(playlist_id) == "loading":
-        loading_hint = "\n\n⏳ 正在后台加载剩余歌曲，播放时会自动续接..."
-
     await status.edit_text(
-        f"📀 <b>歌单</b>（共{total_count}首，已加载{len(songs)}首）{loading_hint}\n\n请选择播放方式：",
+        f"📀 <b>歌单</b>（共{len(songs)}首）\n\n请选择播放方式：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML",
     )
@@ -1003,21 +998,6 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
 
     chat_id = update.callback_query.message.chat_id
     user_id = update.callback_query.from_user.id
-
-    # 方案2：如果歌单还在懒加载中，等待加载完成
-    if playlist_lazy_loading.get(playlist_id) == "loading":
-        await update.callback_query.edit_message_text(
-            f"⏳ 歌单 {playlist_id} 正在后台加载剩余歌曲，请稍候...\n\n"
-            f"已加载 {len(songs)} 首，加载完成后会自动开始播放。"
-        )
-        # 等待懒加载完成（最多等待60秒）
-        wait_count = 0
-        while playlist_lazy_loading.get(playlist_id) == "loading" and wait_count < 60:
-            await asyncio.sleep(1)
-            wait_count += 1
-        # 重新从context获取完整歌曲列表
-        songs = context.user_data.get(f"playlist_{playlist_id}", songs)
-        logger.info(f"歌单懒加载等待完成：playlist_id={playlist_id} 等待{wait_count}秒 最终歌曲数={len(songs)}")
 
     # 排队机制：如果用户已有正在播放的歌单，将新歌单加入队列
     existing = db.get_active_playlist(user_id)
