@@ -320,7 +320,7 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
         if cached:
             try:
                 logger.info(f"{log_prefix}📦 使用file_id缓存: {song['name']} - {song['artist']}")
-                await _bot.send_audio(
+                msg = await _bot.send_audio(
                     chat_id=chat_id,
                     message_thread_id=message_thread_id,
                     audio=cached,
@@ -330,9 +330,39 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                     parse_mode="HTML",
                     duration=song["duration"] // 1000 if song.get("duration") else None,
                 )
-                return True, cached, "file_id"
+                
+                # 检查返回的音频标题是否正确
+                if msg and msg.audio:
+                    actual_title = (msg.audio.title or "").strip()
+                    expected_name = (song["name"] or "").strip()
+                    
+                    # 判断标题是否不正确：为空、纯数字、等于song_id、或与期望名称完全不同
+                    is_wrong_title = False
+                    if not actual_title:
+                        is_wrong_title = True
+                    elif actual_title.isdigit():
+                        is_wrong_title = True
+                    elif actual_title == str(song_id):
+                        is_wrong_title = True
+                    elif expected_name and actual_title != expected_name:
+                        # 标题与期望名称不同，可能是旧缓存的错误标题
+                        # 只在差异明显时才清除（避免因为特殊字符导致误判）
+                        if len(actual_title) < 2 or actual_title.replace(" ", "") != expected_name.replace(" ", ""):
+                            is_wrong_title = True
+                    
+                    if is_wrong_title:
+                        logger.warning(f"{log_prefix}⚠️ file_id缓存标题不正确: 实际='{actual_title}' 期望='{expected_name}'，清除缓存重新上传")
+                        db._exec("DEL", f"cache:file_id:{song_id}")
+                        # 继续使用代理或Render下载重新发送
+                    else:
+                        return True, cached, "file_id"
+                else:
+                    return True, cached, "file_id"
+                    
             except Exception as e:
-                logger.warning(f"{log_prefix}file_id缓存发送失败，回退代理: {e}")
+                logger.warning(f"{log_prefix}file_id缓存发送失败，清除失效缓存并回退代理: {e}")
+                # 发送失败，清除可能失效的file_id缓存
+                db._exec("DEL", f"cache:file_id:{song_id}")
     
     # 2. 构建代理列表（歌单缓存优先CF反向代理，然后Vercel）
     proxy_list = []
