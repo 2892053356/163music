@@ -974,26 +974,17 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
                 if cached:
+                    logger.info(f"歌单播放 [{idx}/{len(songs)}] 📦 使用file_id缓存: {song['name']} - {song['artist']}")
                     await context.bot.send_audio(
                         chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
                     )
-                else:
-                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
-                    if not url:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    resp = await asyncio.to_thread(requests_get, url, 45)
-                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    audio_bytes = io.BytesIO(resp.content)
-                    audio_bytes = _tag_mp3(audio_bytes, song)
+                elif config.AUDIO_PROXY_URL:
+                    proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
+                    proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                    logger.info(f"歌单播放 [{idx}/{len(songs)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                     msg = await context.bot.send_audio(
                         chat_id=chat_id,
-                        audio=audio_bytes,
-                        filename=f"{song['name']}.mp3",
+                        audio=proxy_url,
                         title=song["name"],
                         performer=song["artist"],
                         caption=caption,
@@ -1002,6 +993,11 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     )
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
+                else:
+                    logger.warning(f"歌单播放 [{idx}/{len(songs)}] ❌ 无file_id且无代理配置，跳过: {song['name']}")
+                    failed += 1
+                    db.update_playlist_index(user_id, idx)
+                    continue
                 # 记录发送时间戳（5秒去重）
                 playlist_sent_songs[user_id][song["id"]] = time.time()
                 success += 1
@@ -1115,26 +1111,17 @@ async def _play_playlist_all_queue(context, chat_id: int, user_id: int, playlist
                 cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
                 if cached:
+                    logger.info(f"歌单队列播放 [{idx}/{len(to_play)}] 📦 使用file_id缓存: {song['name']} - {song['artist']}")
                     await context.bot.send_audio(
                         chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
                     )
-                else:
-                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
-                    if not url:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    resp = await asyncio.to_thread(requests_get, url, 45)
-                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
-                        failed += 1
-                        db.update_playlist_index(user_id, idx)
-                        continue
-                    audio_bytes = io.BytesIO(resp.content)
-                    audio_bytes = _tag_mp3(audio_bytes, song)
+                elif config.AUDIO_PROXY_URL:
+                    proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
+                    proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                    logger.info(f"歌单队列播放 [{idx}/{len(to_play)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                     msg = await context.bot.send_audio(
                         chat_id=chat_id,
-                        audio=audio_bytes,
-                        filename=f"{song['name']}.mp3",
+                        audio=proxy_url,
                         title=song["name"],
                         performer=song["artist"],
                         caption=caption,
@@ -1143,6 +1130,11 @@ async def _play_playlist_all_queue(context, chat_id: int, user_id: int, playlist
                     )
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
+                else:
+                    logger.warning(f"歌单队列播放 [{idx}/{len(to_play)}] ❌ 无file_id且无代理配置，跳过: {song['name']}")
+                    failed += 1
+                    db.update_playlist_index(user_id, idx)
+                    continue
                 playlist_sent_songs[user_id][song["id"]] = time.time()
                 success += 1
                 db.update_playlist_index(user_id, idx)
@@ -1474,6 +1466,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     cached_file_id = await asyncio.to_thread(db.get_file_id, song_id)
     if cached_file_id:
         try:
+            logger.info(f"播放歌曲 📦 使用file_id缓存: {song['name']} - {song['artist']} (用户={user_label})")
             await context.bot.send_audio(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
@@ -1487,14 +1480,15 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             active_search_plays.discard(user.id)
             return
         except Exception as e:
-            logger.warning(f"file_id缓存发送失败，回退下载: {e}")
+            logger.warning(f"file_id缓存发送失败，回退代理: {e}")
 
     # 缓存未命中：必须使用外部代理URL发送（禁止Render下载+上传）
     if config.AUDIO_PROXY_URL:
         try:
             from urllib.parse import quote
             _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}&artist={quote(song['artist'])}"
-            logger.info(f"通过代理URL发送音频: {song['name']}")
+            proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+            logger.info(f"播放歌曲 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']} (用户={user_label}) -> {_proxy_url[:80]}...")
             msg = await context.bot.send_audio(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
