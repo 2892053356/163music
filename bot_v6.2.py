@@ -994,10 +994,32 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
                 else:
-                    logger.warning(f"歌单播放 [{idx}/{len(songs)}] ❌ 无file_id且无代理配置，跳过: {song['name']}")
-                    failed += 1
-                    db.update_playlist_index(user_id, idx)
-                    continue
+                    # 无代理时回退到Render下载+上传
+                    logger.info(f"歌单播放 [{idx}/{len(songs)}] 🖥️ 使用Render下载: {song['name']} - {song['artist']}")
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
+                    if not url:
+                        failed += 1
+                        db.update_playlist_index(user_id, idx)
+                        continue
+                    resp = await asyncio.to_thread(requests_get, url, 45)
+                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                        failed += 1
+                        db.update_playlist_index(user_id, idx)
+                        continue
+                    audio_bytes = io.BytesIO(resp.content)
+                    audio_bytes = _tag_mp3(audio_bytes, song)
+                    msg = await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_bytes,
+                        filename=f"{song['name']}.mp3",
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=caption,
+                        parse_mode="HTML",
+                        duration=song["duration"] // 1000 if song["duration"] else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
                 # 记录发送时间戳（5秒去重）
                 playlist_sent_songs[user_id][song["id"]] = time.time()
                 success += 1
@@ -1111,14 +1133,14 @@ async def _play_playlist_all_queue(context, chat_id: int, user_id: int, playlist
                 cached = db.get_file_id(song["id"])
                 caption = _song_caption(song)
                 if cached:
-                    logger.info(f"歌单队列播放 [{idx}/{len(to_play)}] 📦 使用file_id缓存: {song['name']} - {song['artist']}")
+                    logger.info(f"歌单队列播放 [{idx}/{len(songs)}] 📦 使用file_id缓存: {song['name']} - {song['artist']}")
                     await context.bot.send_audio(
                         chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
                     )
                 elif config.AUDIO_PROXY_URL:
                     proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
                     proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-                    logger.info(f"歌单队列播放 [{idx}/{len(to_play)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
+                    logger.info(f"歌单队列播放 [{idx}/{len(songs)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                     msg = await context.bot.send_audio(
                         chat_id=chat_id,
                         audio=proxy_url,
@@ -1131,10 +1153,32 @@ async def _play_playlist_all_queue(context, chat_id: int, user_id: int, playlist
                     if msg and msg.audio and msg.audio.file_id:
                         db.set_file_id(song["id"], msg.audio.file_id)
                 else:
-                    logger.warning(f"歌单队列播放 [{idx}/{len(to_play)}] ❌ 无file_id且无代理配置，跳过: {song['name']}")
-                    failed += 1
-                    db.update_playlist_index(user_id, idx)
-                    continue
+                    # 无代理时回退到Render下载+上传
+                    logger.info(f"歌单队列播放 [{idx}/{len(songs)}] 🖥️ 使用Render下载: {song['name']} - {song['artist']}")
+                    url = await asyncio.to_thread(api.get_first_song_url, song["id"], db.get_quality())
+                    if not url:
+                        failed += 1
+                        db.update_playlist_index(user_id, idx)
+                        continue
+                    resp = await asyncio.to_thread(requests_get, url, 45)
+                    if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                        failed += 1
+                        db.update_playlist_index(user_id, idx)
+                        continue
+                    audio_bytes = io.BytesIO(resp.content)
+                    audio_bytes = _tag_mp3(audio_bytes, song)
+                    msg = await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_bytes,
+                        filename=f"{song['name']}.mp3",
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=caption,
+                        parse_mode="HTML",
+                        duration=song["duration"] // 1000 if song["duration"] else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
                 playlist_sent_songs[user_id][song["id"]] = time.time()
                 success += 1
                 db.update_playlist_index(user_id, idx)
@@ -1519,14 +1563,56 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
             active_search_plays.discard(user.id)
             return
     else:
-        # 未配置代理URL，无法发送（禁止Render下载+上传）
-        err_msg = f"❌ 未配置音频代理服务（AUDIO_PROXY_URL），无法发送音频。\n\n请配置 Netlify 或 Cloudflare 音频代理。"
-        if edit:
-            await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
-        else:
-            await update.message.reply_text(err_msg, parse_mode="HTML")
-        active_search_plays.discard(user.id)
-        return
+        # 未配置代理URL，回退到Render下载+上传
+        logger.info(f"播放歌曲 🖥️ 无代理配置，使用Render下载: {song['name']} - {song['artist']} (用户={user_label})")
+        if not url:
+            err_msg = f"❌ 无法获取播放地址，该歌曲可能需要VIP或已下架。\n\n{_song_caption(song)}"
+            if edit:
+                await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
+            else:
+                await update.message.reply_text(err_msg, parse_mode="HTML")
+            active_search_plays.discard(user.id)
+            return
+        try:
+            resp = await asyncio.to_thread(requests_get, url, 45)
+            if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+                err_msg = f"❌ 音频下载失败（status={resp.status_code}），请稍后重试。\n\n{_song_caption(song)}"
+                if edit:
+                    await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
+                else:
+                    await update.message.reply_text(err_msg, parse_mode="HTML")
+                active_search_plays.discard(user.id)
+                return
+            audio_bytes = io.BytesIO(resp.content)
+            audio_bytes = _tag_mp3(audio_bytes, song)
+            msg = await context.bot.send_audio(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                audio=audio_bytes,
+                filename=f"{song['name']} - {config.MUSIC_QUALITY}.mp3",
+                title=song["name"],
+                performer=song["artist"],
+                caption=caption,
+                parse_mode="HTML",
+                thumbnail=song["cover"] if song["cover"] else None,
+                duration=song["duration"] // 1000 if song["duration"] else None,
+                reply_markup=reply_markup,
+            )
+            if edit:
+                await update.callback_query.delete_message()
+            if msg and msg.audio and msg.audio.file_id:
+                await asyncio.to_thread(db.set_file_id, song_id, msg.audio.file_id)
+            active_search_plays.discard(user.id)
+            return
+        except Exception as e:
+            logger.error(f"Render下载发送失败: {e}")
+            err_msg = f"❌ 音频发送失败: {e}\n\n{_song_caption(song)}"
+            if edit:
+                await update.callback_query.edit_message_text(err_msg, parse_mode="HTML")
+            else:
+                await update.message.reply_text(err_msg, parse_mode="HTML")
+            active_search_plays.discard(user.id)
+            return
 
 
 # 共享下载Session（连接复用）+ 重试适配器
