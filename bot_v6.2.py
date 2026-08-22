@@ -980,7 +980,7 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                     )
                 elif config.AUDIO_PROXY_URL:
                     proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
-                    proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                    proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
                     logger.info(f"歌单播放 [{idx}/{len(songs)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                     msg = await context.bot.send_audio(
                         chat_id=chat_id,
@@ -1139,7 +1139,7 @@ async def _play_playlist_all_queue(context, chat_id: int, user_id: int, playlist
                     )
                 elif config.AUDIO_PROXY_URL:
                     proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
-                    proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                    proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
                     logger.info(f"歌单队列播放 [{idx}/{len(songs)}] 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                     msg = await context.bot.send_audio(
                         chat_id=chat_id,
@@ -1279,7 +1279,7 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
             elif config.AUDIO_PROXY_URL:
                 # 歌单播放只允许使用代理URL，禁止Render下载
                 proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}"
-                proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
                 
                 # 带重试的发送（最多2次）
                 msg = None
@@ -1571,7 +1571,7 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     # 方案A失败：使用外部代理URL发送（带重试），失败时回退到Render下载+上传
     if config.AUDIO_PROXY_URL:
         _proxy_url = f"{config.AUDIO_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}"
-        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
         
         # 带重试的代理发送（最多2次）
         for attempt in range(2):
@@ -1822,7 +1822,7 @@ async def _cache_song_to_admin(context, song, url):
             return None
         
         proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
-        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
         logger.info(f"内联缓存 🌐 使用{proxy_type}代理: {song.get('name')} - {song.get('artist')}")
         
         # 上传到管理员私聊
@@ -2172,7 +2172,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 cover_param = f"&cover={quote(_cover, safe='')}"
             # 内联搜索优先使用 INLINE_PROXY_URL（Netlify），未配置则回退到 AUDIO_PROXY_URL（CF）
             _proxy_base = config.INLINE_PROXY_URL or config.AUDIO_PROXY_URL or config.WEBHOOK_URL.rstrip('/')
-            _proxy_type = "Netlify" if config.INLINE_PROXY_URL else ("CF" if config.AUDIO_PROXY_URL else "Render")
+            _proxy_type = "Vercel" if "vercel" in (_proxy_base or "") else "Netlify" if config.INLINE_PROXY_URL else ("CF" if config.AUDIO_PROXY_URL else "Render")
             proxy_url = f"{_proxy_base}/audio/{song['id']}?name={quote(song['name'])}&artist={quote(song['artist'])}&album={quote(song.get('album', song['name']))}{cover_param}"
             logger.info(f"内联结果 代理歌曲 {song['name']} 代理类型={_proxy_type} proxy_url长度={len(proxy_url)}")
             results.append(
@@ -2985,7 +2985,7 @@ async def cmd_cacheplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # 歌单缓存只允许使用代理URL，禁止Render下载
                     if config.AUDIO_PROXY_URL:
                         proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
-                        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
                         logger.info(f"歌单缓存 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                         msg = await context.bot.send_audio(
                             chat_id=config.ADMIN_ID,
@@ -3124,7 +3124,7 @@ async def cmd_cacheuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # 歌单缓存只允许使用代理URL，禁止Render下载
                     if config.AUDIO_PROXY_URL:
                         proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={config.MUSIC_QUALITY}"
-                        proxy_type = "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
+                        proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
                         logger.info(f"漫游缓存 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
                         msg = await context.bot.send_audio(
                             chat_id=config.ADMIN_ID,
