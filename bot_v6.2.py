@@ -1095,30 +1095,14 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
     total_songs = len(songs)
     total_batches = (total_songs + BATCH_SIZE - 1) // BATCH_SIZE
 
-    # 构建歌单控制按钮（用户可暂停/恢复自己的歌单，管理员可控制所有用户）
-    playlist_buttons = [
-        [InlineKeyboardButton("⏸️ 暂停歌单", callback_data=f"pause_pl:{user_id}"),
-         InlineKeyboardButton("▶️ 恢复歌单", callback_data=f"resume_pl:{user_id}")]
-    ]
-    if _is_admin(user_id):
-        playlist_buttons.append([
-            InlineKeyboardButton("⏸️ 暂停所有用户", callback_data="pause_all_pl"),
-            InlineKeyboardButton("▶️ 恢复所有用户", callback_data="resume_all_pl")
-        ])
-    playlist_reply_markup = InlineKeyboardMarkup(playlist_buttons)
-
     if total_songs > BATCH_SIZE:
         await update.callback_query.edit_message_text(
             f"▶️ 歌单共 {total_songs} 首，将分 {total_batches} 批次播放（每批 {BATCH_SIZE} 首）...\n\n"
-            f"第 1/{total_batches} 批开始播放...\n\n"
-            f"💡 点击下方按钮可暂停/恢复歌单播放",
-            reply_markup=playlist_reply_markup
+            f"第 1/{total_batches} 批开始播放..."
         )
     else:
         await update.callback_query.edit_message_text(
-            f"▶️ 开始全部播放 {total_songs} 首歌曲...\n\n"
-            f"💡 点击下方按钮可暂停/恢复歌单播放",
-            reply_markup=playlist_reply_markup
+            f"▶️ 开始全部播放 {total_songs} 首歌曲..."
         )
 
     # 保存播放状态到Redis（从第0首开始）
@@ -1139,24 +1123,6 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 )
                 db.remove_active_playlist(user_id)
                 return
-            # 检查用户暂停和全局暂停
-            _user_paused = db.check_playlist_paused(user_id)
-            _all_paused = db.check_all_playlist_paused()
-            if _user_paused or _all_paused:
-                logger.info(f"歌单播放暂停：用户={user_id} 用户暂停={_user_paused} 全局暂停={_all_paused}，等待恢复...")
-            while db.check_playlist_paused(user_id) or db.check_all_playlist_paused():
-                await asyncio.sleep(2)
-                # 暂停时也检查停止标志
-                if db.check_playlist_stop_flag(user_id):
-                    logger.info(f"歌单播放：用户={user_id} 被管理员停止（暂停中），已播放{idx-1}首")
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"⏹️ 歌单播放已被管理员停止。已播放{idx-1}首（成功{success}，失败{failed}）。"
-                    )
-                    db.remove_active_playlist(user_id)
-                    return
-            if _user_paused or _all_paused:
-                logger.info(f"歌单播放恢复：用户={user_id}，继续播放第{idx}首")
             # 中等优先级：最近3秒有用户活动则暂停（比缓存排行榜高，比用户单曲低）
             # 高优先级：有用户正在搜索播放时暂停（内联搜索 > 普通搜索 > 歌单播放）
             while time.time() - last_user_activity < 3 or active_search_plays:
@@ -1409,23 +1375,45 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                 await bot.send_audio(
                     chat_id=chat_id, audio=cached, caption=caption, parse_mode="HTML"
                 )
-            elif config.AUDIO_PROXY_URL:
-                # 歌单播放只允许使用代理URL，禁止Render下载
-                from urllib.parse import quote
-                proxy_url = f"{config.AUDIO_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}&name={quote(song['name'])}"
-                proxy_type = "Vercel" if "vercel" in config.AUDIO_PROXY_URL else "CF" if "workers.dev" in config.AUDIO_PROXY_URL else "Netlify" if "netlify" in config.AUDIO_PROXY_URL else "代理"
-                
-                # 带重试的发送（最多2次）
-                msg = None
-                for attempt in range(2):
-                    try:
-                        if attempt > 0:
-                            logger.info(f"歌单续播 🔄 重试{attempt}/{1}: {song['name']} - {song['artist']}")
-                            await asyncio.sleep(1)
-                        logger.info(f"歌单续播 🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
+                success += 1
+                db.update_playlist_index(user_id, idx)
+                await asyncio.sleep(1)
+                continue
+            
+            # 歌单播放：CF代理 → 网易云直链 二回退机制
+            from urllib.parse import quote
+            cf_proxy_url = f"{config.CF_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}&name={quote(song['name'])}" if config.CF_PROXY_URL else ""
+            
+            sent = False
+            # 回退1：CF代理
+            if cf_proxy_url:
+                try:
+                    logger.info(f"歌单续播 🌐 使用CF代理: {song['name']} - {song['artist']}")
+                    msg = await bot.send_audio(
+                        chat_id=chat_id,
+                        audio=cf_proxy_url,
+                        filename=f"{song['name']}.mp3",
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=caption,
+                        parse_mode="HTML",
+                        duration=song["duration"] // 1000 if song["duration"] else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
+                    sent = True
+                except Exception as e:
+                    logger.warning(f"歌单续播 CF代理失败，尝试直链: {song['name']} - {e}")
+            
+            # 回退2：网易云直链
+            if not sent:
+                try:
+                    direct_url = api.get_first_song_url(song["id"], level=db.get_quality())
+                    if direct_url:
+                        logger.info(f"歌单续播 🔗 使用网易云直链: {song['name']} - {song['artist']}")
                         msg = await bot.send_audio(
                             chat_id=chat_id,
-                            audio=proxy_url,
+                            audio=direct_url,
                             filename=f"{song['name']}.mp3",
                             title=song["name"],
                             performer=song["artist"],
@@ -1433,22 +1421,19 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                             parse_mode="HTML",
                             duration=song["duration"] // 1000 if song["duration"] else None,
                         )
-                        break  # 成功，跳出重试循环
-                    except Exception as e:
-                        if attempt == 0:
-                            logger.warning(f"歌单续播第{attempt+1}次失败，准备重试: {song['name']} - {e}")
-                        else:
-                            raise  # 最后一次失败，抛出异常
-                
-                if msg and msg.audio and msg.audio.file_id:
-                    db.set_file_id(song["id"], msg.audio.file_id)
+                        if msg and msg.audio and msg.audio.file_id:
+                            db.set_file_id(song["id"], msg.audio.file_id)
+                        sent = True
+                    else:
+                        logger.warning(f"歌单续播 直链为空: {song['name']}")
+                except Exception as e:
+                    logger.warning(f"歌单续播 直链失败: {song['name']} - {e}")
+            
+            if sent:
+                success += 1
             else:
-                # 无代理配置时跳过（歌单播放禁止Render下载）
-                logger.info(f"歌单续播 ⏭️ {song['name']} - 无代理配置，跳过（歌单播放禁止Render下载）")
+                logger.warning(f"歌单续播 所有回退都失败: {song['name']}")
                 failed += 1
-                db.update_playlist_index(user_id, idx)
-                continue
-            success += 1
             db.update_playlist_index(user_id, idx)
         except Exception as e:
             logger.warning(f"歌单续播失败 {song['name']}: {e}")
@@ -1513,58 +1498,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📀 <b>歌单</b>（共{len(songs)}首）\n\n请选择播放方式：",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML",
-        )
-    elif data.startswith("pause_pl:"):
-        # 暂停用户歌单播放
-        target_uid = int(data.split(":", 1)[1])
-        # 只能暂停自己的歌单，管理员可以暂停任意用户
-        if user.id != target_uid and not _is_admin(user.id):
-            await query.answer("⛔ 你只能暂停自己的歌单", show_alert=True)
-            return
-        db.set_playlist_pause(target_uid)
-        logger.info(f"歌单暂停：用户={user.id} 暂停用户={target_uid} 的歌单")
-        await query.answer("⏸️ 歌单已暂停", show_alert=True)
-        await query.edit_message_text(
-            f"⏸️ 歌单播放已暂停\n\n用户ID: {target_uid}\n\n点击「恢复歌单」按钮继续播放。",
-            reply_markup=query.message.reply_markup
-        )
-    elif data.startswith("resume_pl:"):
-        # 恢复用户歌单播放
-        target_uid = int(data.split(":", 1)[1])
-        # 只能恢复自己的歌单，管理员可以恢复任意用户
-        if user.id != target_uid and not _is_admin(user.id):
-            await query.answer("⛔ 你只能恢复自己的歌单", show_alert=True)
-            return
-        db.clear_playlist_pause(target_uid)
-        logger.info(f"歌单恢复：用户={user.id} 恢复用户={target_uid} 的歌单")
-        await query.answer("▶️ 歌单已恢复", show_alert=True)
-        await query.edit_message_text(
-            f"▶️ 歌单播放已恢复\n\n用户ID: {target_uid}\n\n正在继续播放歌单...",
-            reply_markup=query.message.reply_markup
-        )
-    elif data == "pause_all_pl":
-        # 管理员暂停所有用户歌单播放
-        if not _is_admin(user.id):
-            await query.answer("⛔ 权限不足", show_alert=True)
-            return
-        db.set_all_playlist_pause()
-        logger.info(f"管理员暂停所有用户歌单：操作人={user.id}")
-        await query.answer("⏸️ 已暂停所有用户歌单", show_alert=True)
-        await query.edit_message_text(
-            "⏸️ 所有用户歌单播放已暂停\n\n管理员操作\n\n点击「恢复所有用户」按钮继续播放。",
-            reply_markup=query.message.reply_markup
-        )
-    elif data == "resume_all_pl":
-        # 管理员恢复所有用户歌单播放
-        if not _is_admin(user.id):
-            await query.answer("⛔ 权限不足", show_alert=True)
-            return
-        db.clear_all_playlist_pause()
-        logger.info(f"管理员恢复所有用户歌单：操作人={user.id}")
-        await query.answer("▶️ 已恢复所有用户歌单", show_alert=True)
-        await query.edit_message_text(
-            "▶️ 所有用户歌单播放已恢复\n\n管理员操作\n\n正在继续播放所有歌单...",
-            reply_markup=query.message.reply_markup
         )
     elif data.startswith("stoplist:"):
         # 停止用户歌单播放（管理员可停止任意用户，普通用户只能停止自己）
@@ -3370,7 +3303,7 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 当前没有用户正在播放歌单。")
         return
 
-    # 显示正在播放歌单的用户列表，带暂停/恢复/停止按钮
+    # 显示正在播放歌单的用户列表，带停止按钮
     keyboard = []
     info_lines = []
     for uid in active_users:
@@ -3380,9 +3313,6 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         playlist_id = data.get("playlist_id", "?")
         current = data.get("current_index", 0)
         total = data.get("total", 0)
-        # 检查是否已暂停
-        is_paused = db.check_playlist_paused(uid)
-        pause_status = " ⏸️已暂停" if is_paused else " ▶️播放中"
         # 获取用户名
         try:
             user_info = await context.bot.get_chat(uid)
@@ -3391,150 +3321,13 @@ async def cmd_playlist_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name += f" (@{user_info.username})"
         except Exception:
             name = str(uid)
-        info_lines.append(f"• {name}{pause_status}\n  歌单ID: {playlist_id}，进度: {current}/{total}")
-        # 每个用户一行：暂停/恢复 + 停止
-        if is_paused:
-            pause_btn = InlineKeyboardButton("▶️ 恢复", callback_data=f"resume_pl:{uid}")
-        else:
-            pause_btn = InlineKeyboardButton("⏸️ 暂停", callback_data=f"pause_pl:{uid}")
+        info_lines.append(f"• {name}\n  歌单ID: {playlist_id}，进度: {current}/{total}")
+        # 每个用户一行：停止按钮
         stop_btn = InlineKeyboardButton("⏹️ 停止", callback_data=f"stoplist:{uid}")
-        keyboard.append([pause_btn, stop_btn])
+        keyboard.append([stop_btn])
 
-    text = "📊 <b>正在播放歌单的用户</b>\n\n" + "\n\n".join(info_lines) + "\n\n点击下方按钮控制对应用户的歌单播放（暂停/恢复/停止）："
+    text = "📊 <b>正在播放歌单的用户</b>\n\n" + "\n\n".join(info_lines) + "\n\n点击下方按钮停止对应用户的歌单播放："
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户暂停自己的歌单播放"""
-    user = update.effective_user
-    active = db.get_active_playlist(user.id)
-    if not active:
-        await update.message.reply_text("📭 你当前没有正在播放的歌单。")
-        return
-
-    db.set_playlist_pause(user.id)
-    playlist_id = active.get("playlist_id", "?")
-    current = active.get("current_index", 0)
-    total = active.get("total", 0)
-    await update.message.reply_text(
-        f"⏸️ 已暂停你的歌单播放\n\n"
-        f"歌单ID: {playlist_id}\n"
-        f"进度: {current}/{total}\n\n"
-        f"使用 /resume 恢复播放"
-    )
-    logger.info(f"用户暂停歌单：用户={user.id} 歌单={playlist_id} 进度={current}/{total}")
-
-
-async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户恢复自己的歌单播放"""
-    user = update.effective_user
-    active = db.get_active_playlist(user.id)
-    if not active:
-        await update.message.reply_text("📭 你当前没有正在播放的歌单。")
-        return
-
-    if not db.check_playlist_paused(user.id):
-        await update.message.reply_text("▶️ 你的歌单没有被暂停。")
-        return
-
-    db.clear_playlist_pause(user.id)
-    playlist_id = active.get("playlist_id", "?")
-    current = active.get("current_index", 0)
-    total = active.get("total", 0)
-    await update.message.reply_text(
-        f"▶️ 已恢复你的歌单播放\n\n"
-        f"歌单ID: {playlist_id}\n"
-        f"进度: {current}/{total}"
-    )
-    logger.info(f"用户恢复歌单：用户={user.id} 歌单={playlist_id} 进度={current}/{total}")
-
-
-async def cmd_myplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户查看并控制自己的歌单播放"""
-    user = update.effective_user
-    active = db.get_active_playlist(user.id)
-    if not active:
-        await update.message.reply_text("📭 你当前没有正在播放的歌单。\n\n使用 /playlist <歌单ID> 开始播放歌单。")
-        return
-
-    playlist_id = active.get("playlist_id", "?")
-    current = active.get("current_index", 0)
-    total = active.get("total", 0)
-    start_time = active.get("start_time", 0)
-    is_paused = db.check_playlist_paused(user.id)
-
-    import datetime
-    if start_time:
-        start_str = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        start_str = "未知"
-
-    status_text = "⏸️ 已暂停" if is_paused else "▶️ 播放中"
-    progress_text = f"{current}/{total}"
-    if total > 0:
-        percent = int(current / total * 100)
-        progress_text += f" ({percent}%)"
-
-    text = (
-        f"🎵 <b>我的歌单</b>\n\n"
-        f"状态: {status_text}\n"
-        f"歌单ID: <code>{playlist_id}</code>\n"
-        f"进度: {progress_text}\n"
-        f"开始时间: {start_str}\n\n"
-        f"点击下方按钮控制歌单播放："
-    )
-
-    # 控制按钮
-    keyboard = []
-    if is_paused:
-        keyboard.append([InlineKeyboardButton("▶️ 恢复歌单", callback_data=f"resume_pl:{user.id}")])
-    else:
-        keyboard.append([InlineKeyboardButton("⏸️ 暂停歌单", callback_data=f"pause_pl:{user.id}")])
-    keyboard.append([InlineKeyboardButton("⏹️ 停止歌单", callback_data=f"stoplist:{user.id}")])
-
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    logger.info(f"用户查看歌单：用户={user.id} 歌单={playlist_id} 进度={current}/{total} 暂停={is_paused}")
-
-
-async def cmd_pauseall(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员：暂停所有用户的歌单播放"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        await update.message.reply_text("⛔ 权限不足。")
-        return
-
-    active_users = db.get_active_playlist_users()
-    if not active_users:
-        await update.message.reply_text("📭 当前没有用户正在播放歌单。")
-        return
-
-    db.set_all_playlist_pause()
-    await update.message.reply_text(
-        f"⏸️ 已暂停所有用户的歌单播放\n\n"
-        f"影响用户数: {len(active_users)}\n\n"
-        f"使用 /resumeall 恢复所有播放"
-    )
-    logger.info(f"管理员暂停所有歌单：管理员={user.id} 影响用户数={len(active_users)}")
-
-
-async def cmd_resumeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员：恢复所有用户的歌单播放"""
-    user = update.effective_user
-    if not _is_admin(user.id):
-        await update.message.reply_text("⛔ 权限不足。")
-        return
-
-    if not db.check_all_playlist_paused():
-        await update.message.reply_text("▶️ 当前没有全局暂停。")
-        return
-
-    db.clear_all_playlist_pause()
-    active_users = db.get_active_playlist_users()
-    await update.message.reply_text(
-        f"▶️ 已恢复所有用户的歌单播放\n\n"
-        f"恢复用户数: {len(active_users)}"
-    )
-    logger.info(f"管理员恢复所有歌单：管理员={user.id} 恢复用户数={len(active_users)}")
 
 
 async def cmd_refreshcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3666,11 +3459,6 @@ def main():
     application.add_handler(CommandHandler("cacheplaylist", cmd_cacheplaylist))
     application.add_handler(CommandHandler("cacheuser", cmd_cacheuser))
     application.add_handler(CommandHandler("playliststop", cmd_playlist_stop))
-    application.add_handler(CommandHandler("pause", cmd_pause))
-    application.add_handler(CommandHandler("resume", cmd_resume))
-    application.add_handler(CommandHandler("myplaylist", cmd_myplaylist))
-    application.add_handler(CommandHandler("pauseall", cmd_pauseall))
-    application.add_handler(CommandHandler("resumeall", cmd_resumeall))
     application.add_handler(CommandHandler("refreshcache", cmd_refreshcache))
 
     # 管理员上传 .txt 文件设置 cookie
