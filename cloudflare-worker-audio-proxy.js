@@ -166,12 +166,18 @@ async function setCachedAudioUrl(songId, quality, url, env) {
 
 /**
  * 从 Upstash 获取 Cookie
+ * 注意：Upstash 中存储的是 MUSIC_U 的值，需要包装成完整的 Cookie 字符串
  */
 async function getCookie(env) {
-  // 优先使用环境变量中的 Cookie
-  if (env.NETEASE_COOKIE) return env.NETEASE_COOKIE;
+  // 优先使用环境变量中的 Cookie（如果是完整的 Cookie 字符串）
+  if (env.NETEASE_COOKIE) {
+    // 如果已经包含 MUSIC_U=，直接使用；否则包装
+    return env.NETEASE_COOKIE.includes('MUSIC_U=') 
+      ? env.NETEASE_COOKIE 
+      : `MUSIC_U=${env.NETEASE_COOKIE}`;
+  }
   
-  // 其次从 Upstash 读取
+  // 其次从 Upstash 读取（存储的是 MUSIC_U 的值）
   if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
     try {
       const cacheKey = 'bot:cookie';
@@ -179,7 +185,12 @@ async function getCookie(env) {
         headers: { 'Authorization': `Bearer ${env.UPSTASH_REDIS_REST_TOKEN}` }
       });
       const data = await resp.json();
-      return data.result || null;
+      const musicU = data.result;
+      if (musicU) {
+        // 包装成完整的 Cookie 字符串
+        return `MUSIC_U=${musicU}`;
+      }
+      return null;
     } catch (e) {
       console.warn('Upstash cookie GET failed:', e.message);
     }
@@ -209,7 +220,8 @@ async function debugInfo(env) {
       // 读取 Cookie
       const cookie = await getCookie(env);
       info.cookie_from_upstash = cookie ? `已获取 (${cookie.length} 字符)` : '未找到';
-      info.cookie_preview = cookie ? cookie.substring(0, 30) + '...' : null;
+      info.cookie_preview = cookie ? cookie.substring(0, 50) + '...' : null;
+      info.cookie_format_correct = cookie ? cookie.startsWith('MUSIC_U=') : false;
     } catch (e) {
       info.upstash_error = e.message;
     }
