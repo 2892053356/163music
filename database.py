@@ -135,6 +135,18 @@ class UpstashDB:
         """设置 CF 代理 URL"""
         self._exec("SET", "bot:cf_proxy_url", url)
 
+    # ---- 歌单播放开关（管理员控制）----
+    def is_playlist_enabled(self) -> bool:
+        """检查歌单播放功能是否启用（默认启用）"""
+        result = self._exec("GET", "bot:playlist_enabled")
+        if result is None or result == "":
+            return True
+        return result == "1" or result.lower() == "true"
+
+    def set_playlist_enabled(self, enabled: bool):
+        """设置歌单播放功能开关"""
+        self._exec("SET", "bot:playlist_enabled", "1" if enabled else "0")
+
     # ---- Cookie检测时间（重启后继续检测周期）----
     def get_last_cookie_check(self) -> int:
         """获取上次Cookie检测时间戳"""
