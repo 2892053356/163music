@@ -3464,7 +3464,6 @@ def main():
 
             async def webhook_handler(request):
                 global last_user_activity
-                last_user_activity = time.time()
                 if request.can_read_body:
                     try:
                         data = await request.json()
@@ -3478,6 +3477,24 @@ def main():
                                 # 只保留最近100个
                                 if len(_processed_update_ids) > 100:
                                     _processed_update_ids.clear()
+
+                            # 管理员非播放请求不算用户活动：管理员的管理操作不更新last_user_activity，不影响闲时自动缓存
+                            _is_admin_command = False
+                            if update.message and update.message.text and update.message.text.startswith('/'):
+                                _cmd = update.message.text.split()[0].lower()
+                                _admin_commands = ['/admin', '/addadmin', '/removeadmin', '/admins', '/stats', '/users',
+                                                   '/broadcast', '/ban', '/unban', '/banned', '/setwelcome', '/viewwelcome',
+                                                   '/resetwelcome', '/cookie', '/setcookie', '/refreshcookie', '/quality',
+                                                   '/setquality', '/restart', '/cachetop', '/autocache', '/cachestatus',
+                                                   '/cacheplaylist', '/cacheuser', '/playliststop', '/refreshcache',
+                                                   '/pauseall', '/resumeall']
+                                if _cmd in _admin_commands and _is_admin(update.effective_user.id):
+                                    _is_admin_command = True
+                                    logger.debug(f"管理员命令 {_cmd} 不计入用户活动")
+
+                            if not _is_admin_command:
+                                last_user_activity = time.time()
+
                             await application.update_queue.put(update)
                     except Exception as e:
                         logger.error(f"Webhook处理失败: {e}")
