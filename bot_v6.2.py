@@ -284,7 +284,7 @@ def _is_wrong_audio_title(actual_title: str, expected_name: str, song_id: int) -
     2. 标题是纯数字（歌曲id）
     3. 标题等于song_id
     4. 标题是长字母串（如file_id本身，长度>40且主要是字母数字）
-    5. 标题与期望名称明显不同（忽略大小写和空格）
+    5. 标题与期望名称明显不同（忽略大小写和空格，且不是期望名称的子串）
     """
     if not actual_title or not actual_title.strip():
         return True
@@ -307,10 +307,11 @@ def _is_wrong_audio_title(actual_title: str, expected_name: str, song_id: int) -
             return True
     
     # 与期望名称明显不同（忽略大小写和空格）
+    # 放宽判断：只有当标题既不等于期望名称，也不包含期望名称时才判定为不正确
     if expected_name:
         actual_clean = title.replace(" ", "").lower()
         expected_clean = expected_name.replace(" ", "").lower()
-        if actual_clean != expected_clean:
+        if actual_clean != expected_clean and expected_clean not in actual_clean and actual_clean not in expected_clean:
             return True
     
     return False
@@ -411,20 +412,22 @@ async def _send_audio_with_fallback(context, chat_id, song, quality="standard", 
                 # 发送失败，清除可能失效的file_id缓存
                 db.delete_file_id(song_id)
     
-    # 2. 构建代理列表（CF反向代理）
+    # 2. 构建代理列表（CF反向代理）- 先获取网易云直链，再通过/proxy转发
     proxy_list = []
     
     # CF反向代理（如果配置了）
     if config.CF_PROXY_URL:
-        proxy_list.append((config.CF_PROXY_URL, "CF反向代理"))
+        # 先获取网易云直链
+        direct_url = await asyncio.to_thread(api.get_first_song_url, song_id, quality)
+        if direct_url:
+            from urllib.parse import quote
+            cf_proxy_url = f"{config.CF_PROXY_URL.rstrip('/')}/proxy?url={quote(direct_url)}"
+            proxy_list.append((cf_proxy_url, "CF反向代理"))
     
     # 3. 尝试每个代理
-    for proxy_base, proxy_type in proxy_list:
+    for proxy_url, proxy_type in proxy_list:
         try:
-            # 传递歌曲名称参数，让代理设置正确的Content-Disposition文件名
-            from urllib.parse import quote
-            proxy_url = f"{proxy_base.rstrip('/')}/audio/{song_id}?quality={quality}&name={quote(song['name'])}"
-            logger.info(f"{log_prefix}🌐 使用{proxy_type}代理: {song['name']} - {song['artist']}")
+            logger.info(f"{log_prefix}🌐 使用{proxy_type}: {song['name']} - {song['artist']}")
             
             msg = await _bot.send_audio(
                 chat_id=chat_id,
@@ -1198,10 +1201,13 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                 
                 # 歌单播放：CF代理 → 网易云直链 二回退机制
                 from urllib.parse import quote
-                cf_proxy_url = f"{config.CF_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}&name={quote(song['name'])}" if config.CF_PROXY_URL else ""
+                
+                # 先获取网易云直链（CF代理需要通过/proxy?url=xxx转发）
+                direct_url = api.get_first_song_url(song["id"], level=db.get_quality())
+                cf_proxy_url = f"{config.CF_PROXY_URL}/proxy?url={quote(direct_url)}" if (config.CF_PROXY_URL and direct_url) else ""
                 
                 sent = False
-                # 回退1：CF代理
+                # 回退1：CF代理（通过/proxy转发网易云直链）
                 if cf_proxy_url:
                     try:
                         logger.info(f"歌单播放 🌐 使用CF代理: {song['name']} - {song['artist']}")
@@ -1222,26 +1228,22 @@ async def _play_playlist_all(update: Update, context, playlist_id: int):
                         logger.warning(f"歌单播放 CF代理失败，尝试直链: {song['name']} - {e}")
                 
                 # 回退2：网易云直链
-                if not sent:
+                if not sent and direct_url:
                     try:
-                        direct_url = api.get_first_song_url(song["id"], level=db.get_quality())
-                        if direct_url:
-                            logger.info(f"歌单播放 🔗 使用网易云直链: {song['name']} - {song['artist']}")
-                            msg = await context.bot.send_audio(
-                                chat_id=chat_id,
-                                audio=direct_url,
-                                filename=f"{song['name']}.mp3",
-                                title=song["name"],
-                                performer=song["artist"],
-                                caption=caption,
-                                parse_mode="HTML",
-                                duration=song["duration"] // 1000 if song["duration"] else None,
-                            )
-                            if msg and msg.audio and msg.audio.file_id:
-                                db.set_file_id(song["id"], msg.audio.file_id)
-                            sent = True
-                        else:
-                            logger.warning(f"歌单播放 直链为空: {song['name']}")
+                        logger.info(f"歌单播放 🔗 使用网易云直链: {song['name']} - {song['artist']}")
+                        msg = await context.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=direct_url,
+                            filename=f"{song['name']}.mp3",
+                            title=song["name"],
+                            performer=song["artist"],
+                            caption=caption,
+                            parse_mode="HTML",
+                            duration=song["duration"] // 1000 if song["duration"] else None,
+                        )
+                        if msg and msg.audio and msg.audio.file_id:
+                            db.set_file_id(song["id"], msg.audio.file_id)
+                        sent = True
                     except Exception as e:
                         logger.warning(f"歌单播放 直链失败: {song['name']} - {e}")
                 
@@ -1497,10 +1499,13 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
             
             # 歌单播放：CF代理 → 网易云直链 二回退机制
             from urllib.parse import quote
-            cf_proxy_url = f"{config.CF_PROXY_URL}/audio/{song['id']}?quality={db.get_quality()}&name={quote(song['name'])}" if config.CF_PROXY_URL else ""
+            
+            # 先获取网易云直链（CF代理需要通过/proxy?url=xxx转发）
+            direct_url = api.get_first_song_url(song["id"], level=db.get_quality())
+            cf_proxy_url = f"{config.CF_PROXY_URL}/proxy?url={quote(direct_url)}" if (config.CF_PROXY_URL and direct_url) else ""
             
             sent = False
-            # 回退1：CF代理
+            # 回退1：CF代理（通过/proxy转发网易云直链）
             if cf_proxy_url:
                 try:
                     logger.info(f"歌单续播 🌐 使用CF代理: {song['name']} - {song['artist']}")
@@ -1521,26 +1526,22 @@ async def _resume_playlist_play(application, user_id: int, playlist_id: int, son
                     logger.warning(f"歌单续播 CF代理失败，尝试直链: {song['name']} - {e}")
             
             # 回退2：网易云直链
-            if not sent:
+            if not sent and direct_url:
                 try:
-                    direct_url = api.get_first_song_url(song["id"], level=db.get_quality())
-                    if direct_url:
-                        logger.info(f"歌单续播 🔗 使用网易云直链: {song['name']} - {song['artist']}")
-                        msg = await bot.send_audio(
-                            chat_id=chat_id,
-                            audio=direct_url,
-                            filename=f"{song['name']}.mp3",
-                            title=song["name"],
-                            performer=song["artist"],
-                            caption=caption,
-                            parse_mode="HTML",
-                            duration=song["duration"] // 1000 if song["duration"] else None,
-                        )
-                        if msg and msg.audio and msg.audio.file_id:
-                            db.set_file_id(song["id"], msg.audio.file_id)
-                        sent = True
-                    else:
-                        logger.warning(f"歌单续播 直链为空: {song['name']}")
+                    logger.info(f"歌单续播 🔗 使用网易云直链: {song['name']} - {song['artist']}")
+                    msg = await bot.send_audio(
+                        chat_id=chat_id,
+                        audio=direct_url,
+                        filename=f"{song['name']}.mp3",
+                        title=song["name"],
+                        performer=song["artist"],
+                        caption=caption,
+                        parse_mode="HTML",
+                        duration=song["duration"] // 1000 if song["duration"] else None,
+                    )
+                    if msg and msg.audio and msg.audio.file_id:
+                        db.set_file_id(song["id"], msg.audio.file_id)
+                    sent = True
                 except Exception as e:
                     logger.warning(f"歌单续播 直链失败: {song['name']} - {e}")
             
@@ -1814,9 +1815,9 @@ async def _play_song(update: Update, context: ContextTypes.DEFAULT_TYPE, song_id
     # 构建回退列表（按用户要求的顺序）
     fallback_list = []
     
-    # 1. CF 代理（优先）
-    if config.CF_PROXY_URL:
-        cf_url = f"{config.CF_PROXY_URL.rstrip('/')}/audio/{song_id}?quality={config.MUSIC_QUALITY}&name={quote(song['name'])}"
+    # 1. CF 代理（优先）- 通过/proxy?url=xxx转发网易云直链
+    if config.CF_PROXY_URL and url:
+        cf_url = f"{config.CF_PROXY_URL.rstrip('/')}/proxy?url={quote(url)}"
         fallback_list.append(("CF代理", cf_url))
     
     # 2. 网易云直链（Telegram自行下载，零Render流量）
